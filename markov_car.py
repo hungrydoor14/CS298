@@ -57,7 +57,7 @@ def fictitious_play(Q, iters):
 
     # game val under strats
     value = pi1 @ Q @ pi2
-    return value, pi1, pi2
+    return value, pi1, pi2, "fict"
 
 def pure_nash_equilibria(Q, tol=1e-9):
     """
@@ -80,12 +80,7 @@ def pure_nash_equilibria(Q, tol=1e-9):
 
     return nes
 
-def solve_stage_game(Q, tol=1e-3):
-    """
-    1) Check pure NE
-    2) If none, return None (meaning: run FP)
-    """
-
+def solve_stage_game(Q):
     pure_nes = pure_nash_equilibria(Q)
 
     if pure_nes:
@@ -96,9 +91,10 @@ def solve_stage_game(Q, tol=1e-3):
         pi2 = np.zeros(n); pi2[a2] = 1.0
         value = Q[a1, a2]
 
-        return value, pi1, pi2
-
+        return value, pi1, pi2, "pure"
+    
     return None
+
 
 # Car / Grid Game Environment
 class CarGame:
@@ -216,9 +212,9 @@ def markov_game_q_iteration(env):
             solution = solve_stage_game(Q[s])
 
             if solution is not None:
-                V[s], pi1, pi2 = solution
+                V[s], pi1, pi2, _ = solution
             else:
-                V[s], pi1, pi2 = fictitious_play(Q[s], FP_ITERS)
+                V[s], pi1, pi2, _ = fictitious_play(Q[s], FP_ITERS)
 
             delta = max(delta, np.max(np.abs(Q[s] - Q_old)))
 
@@ -252,17 +248,16 @@ if __name__ == "__main__":
         # Check if there is a solution already, if not use FP
         solution = solve_stage_game(Q[s])
         if solution is not None:
-            value, pi1, pi2 = solution
+            value, pi1, pi2, method = solution
         else:
-            value, pi1, pi2 = fictitious_play(Q[s], FP_ITERS)
-
+            value, pi1, pi2, method = fictitious_play(Q[s], FP_ITERS)
 
         is_ne = check_ne(Q[s], pi1, pi2, value)
         eps = max_deviation(Q[s], pi1, pi2, value)
 
         if is_ne:
             ne_true += 1
-        #print(f"Epsilon = {eps:.6f} | State {s} is NE: {is_ne}")
+        print(f"Epsilon = {eps:.6f} | State {s} | Method: {method} | NE: {is_ne}")
         epsilons.append(eps)
 
     print("\nNE diagnostics:")
