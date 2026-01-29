@@ -8,7 +8,7 @@ from matplotlib.widgets import Button
 GAMMA = 0.9
 TOL = 1e-3
 MAX_Q_ITERS = 200
-FP_ITERS = 800
+FP_ITERS = 200
 
 CRASH_PENALTY = -10.0
 STAY_PENALTY = -5.0
@@ -226,13 +226,6 @@ def max_deviation(Q, pi1, pi2, value):
 
     return max_dev
 
-def argmax_random_tie(p):
-    """
-    Select an action from a mixed strategy with random tie-breaking
-    """
-    m = np.max(p)
-    return np.random.choice(np.where(np.abs(p - m) < 1e-9)[0])
-
 # Markov Game Q-Iteration
 def markov_game_q_iteration(env):
     """
@@ -291,15 +284,6 @@ def markov_game_q_iteration(env):
             break
 
     return Q, V, Pi1, Pi2
-
-# Plotting utilities to make it graph NE actions
-def deterministic_policy(Pi1, Pi2):
-    policy = {}
-    for s in Pi1:
-        a1 = argmax_random_tie(Pi1[s])
-        a2 = argmax_random_tie(Pi2[s])
-        policy[s] = (a1, a2)
-    return policy
 
 def stochastic_policy(Pi1, Pi2, eps=1e-12):
     policy = {}
