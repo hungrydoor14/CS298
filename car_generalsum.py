@@ -8,6 +8,7 @@ GAMMA = 0.9
 TOL = 1e-3
 MAX_Q_ITERS = 100
 FP_ITERS = 100
+CRASH_PENALTY = -10.0
 
 # Actions: Up, Down, Left, Right
 ACTIONS = ['U', 'D', 'L', 'R']
@@ -83,6 +84,15 @@ def solve_stage_game_general(Q1, Q2):
 
     return (v1, v2), pi1, pi2, "br"
 
+def make_grid_reward(n, R_max=5.0, alpha=1.0):
+    c = (n - 1) / 2
+    grid = np.zeros((n, n))
+    for x in range(n):
+        for y in range(n):
+            dist = abs(x - c) + abs(y - c)
+            grid[x, y] = R_max - alpha * dist
+    return grid
+
 # Car / Grid Game Environment
 class CarGame:
     """
@@ -128,9 +138,12 @@ class CarGame:
         x1, y1, x2, y2 = s_next
 
         if (x1, y1) == (x2, y2):
-            return 1.0          # capture
-        else:
-            return -0.01        # living penalty
+            return CRASH_PENALTY     
+        
+        grid_r = self.grid_reward[x1, y1]
+
+        # Small living cost to avoid stalling forever
+        return grid_r - 1
 
 class GeneralSumCarGame(CarGame):
     """
@@ -138,15 +151,31 @@ class GeneralSumCarGame(CarGame):
     P1 wants to collide
     P2 wants to avoid collision
     """
+    def __init__(self, grid_size=5):
+        super().__init__(grid_size)
+        self.grid_reward = make_grid_reward(grid_size, R_max=1.0, alpha=0.2)
 
     def reward(self, s, a1, a2):
         s_next = self.transition(s, a1, a2)
-        collide = (s_next[0], s_next[1]) == (s_next[2], s_next[3])
+        x1, y1, x2, y2 = s_next
 
-        r1 = 1.0 if collide else -0.01
-        r2 = -1.0 if collide else +0.01
+        collide = (x1, y1) == (x2, y2)
+
+        # Manhattan distance between players
+        dist = abs(x1 - x2) + abs(y1 - y2)
+
+        if collide:
+            r1 = 10.0
+            r2 = -10.0
+        else:
+            # Dog wants to minimize distance
+            r1 = -0.2 * dist + 0.1 * self.grid_reward[x1, y1]
+
+            # Prey wants to maximize distance
+            r2 = +0.2 * dist + 0.1 * self.grid_reward[x2, y2]
 
         return r1, r2
+
 
     
 def check_ne(Q, pi1, pi2, value, tol=1e-3):
@@ -252,6 +281,17 @@ def deterministic_policy(Pi1, Pi2):
         policy[s] = (a1, a2)
     return policy
 
+def stochastic_policy(Pi1, Pi2):
+    policy = {}
+    for s in Pi1:
+        pi1 = Pi1[s]
+        pi2 = Pi2[s]
+        policy[s] = (
+            lambda pi=pi1: np.random.choice(A, p=pi),
+            lambda pi=pi2: np.random.choice(A, p=pi)
+        )
+    return policy
+
 def rollout(env, s0, policy, T=30):
     """
     Roll out an equilibrium trajectory from an initial state
@@ -259,19 +299,22 @@ def rollout(env, s0, policy, T=30):
     traj = [s0]
     s = s0
     for _ in range(T):
-        a1, a2 = policy[s]
+        a1 = policy[s][0]()
+        a2 = policy[s][1]()
         s = env.transition(s, a1, a2)
         traj.append(s)
-        if (s[0], s[1]) == (s[2], s[3]):  # collision, stop
+        if (s[0], s[1]) == (s[2], s[3]):
             break
-    print("P2 action:", a2, "state:", s)
     return traj
+
 
 def plot_trajectory(traj, grid_size, title=""):
     """
-    do the actual plotting of the trajectory into the grid
+    Plot the trajectory of both players on the grid with arrows and colors.
+    Added offset to distinguish lanes.
+    1: Red (Player 1)
+    2: Blue (Player 2)
     """
-    # Set up grid-world plotting area
     fig, ax = plt.subplots()
     ax.set_xlim(0, grid_size)
     ax.set_ylim(0, grid_size)
@@ -281,28 +324,48 @@ def plot_trajectory(traj, grid_size, title=""):
     ax.set_aspect("equal")
     ax.set_title(title)
 
+    offset = 0.12
+
+    # Fixed lane offsets (constant per player)
+    off1 = np.array([ offset, 0.0])
+    off2 = np.array([-offset, 0.0])
+
     for s, s_next in zip(traj[:-1], traj[1:]):
+
         # Player 1
-        x, y = s[0], s[1]
-        xn, yn = s_next[0], s_next[1]
-        ax.arrow(x + 0.5, y + 0.5, xn - x, yn - y,
-                 head_width=0.15, color="black", length_includes_head=True)
+        p1_start = np.array([s[0] + 0.5, s[1] + 0.5]) + off1
+        p1_end   = np.array([s_next[0] + 0.5, s_next[1] + 0.5]) + off1
+        d1 = p1_end - p1_start
+
+        ax.arrow(
+            p1_start[0], p1_start[1],
+            d1[0], d1[1],
+            head_width=0.15,
+            color="red",
+            length_includes_head=True
+        )
 
         # Player 2
-        x, y = s[2], s[3]
-        xn, yn = s_next[2], s_next[3]
-        ax.arrow(x + 0.5, y + 0.5, xn - x, yn - y,
-                 head_width=0.15, color="gray", length_includes_head=True)
+        p2_start = np.array([s[2] + 0.5, s[3] + 0.5]) + off2
+        p2_end   = np.array([s_next[2] + 0.5, s_next[3] + 0.5]) + off2
+        d2 = p2_end - p2_start
+
+        ax.arrow(
+            p2_start[0], p2_start[1],
+            d2[0], d2[1],
+            head_width=0.15,
+            color="blue",
+            length_includes_head=True
+        )
 
     plt.show()
-
 
 # Run the car game
 if __name__ == "__main__":
     env = GeneralSumCarGame(grid_size=5)
     Q1, Q2, V1, V2, Pi1_gs, Pi2_gs = markov_game_q_iteration_general(env)
 
-    policy = deterministic_policy(Pi1_gs, Pi2_gs)
+    policy = stochastic_policy(Pi1_gs, Pi2_gs)
 
     s0 = (1, 0, 2, 2)
     traj = rollout(env, s0, policy)

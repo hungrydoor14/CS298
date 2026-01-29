@@ -2,12 +2,17 @@ import numpy as np
 from collections import defaultdict
 
 import matplotlib.pyplot as plt
+from matplotlib.widgets import Button
 
 # Hyperparameters
 GAMMA = 0.9
 TOL = 1e-3
 MAX_Q_ITERS = 200
-FP_ITERS = 200
+FP_ITERS = 800
+
+CRASH_PENALTY = -10.0
+STAY_PENALTY = -5.0
+LIVING_COST = 1.0
 
 # Actions: Up, Down, Left, Right
 ACTIONS = ['U', 'D', 'L', 'R']
@@ -100,6 +105,15 @@ def solve_stage_game(Q):
     
     return None
 
+def make_grid_reward(n, R_max=5.0, alpha=1.0):
+    c = (n - 1) / 2
+    grid = np.zeros((n, n))
+    for x in range(n):
+        for y in range(n):
+            dist = abs(x - c) + abs(y - c)
+            grid[x, y] = R_max - alpha * dist
+    return grid
+
 # Car / Grid Game Environment
 class CarGame:
     """
@@ -111,6 +125,9 @@ class CarGame:
     def __init__(self, grid_size=3):
         self.grid_size = grid_size
         self.states = self._all_states()
+
+        self.grid_reward = make_grid_reward(grid_size, R_max=5.0, alpha=1.0)
+
 
     def _all_states(self):
         S = []
@@ -141,13 +158,32 @@ class CarGame:
         return (x1, y1, x2, y2)
 
     def reward(self, s, a1, a2):
-        s_next = self.transition(s, a1, a2)
-        x1, y1, x2, y2 = s_next
+        r = 0.0 # total reward
 
-        if (x1, y1) == (x2, y2):
-            return 1.0          # capture
-        else:
-            return -0.01        # living penalty
+        # current state
+        x1, y1, x2, y2 = s
+        # next state
+        x1n, y1n, x2n, y2n = self.transition(s, a1, a2)
+
+        # crash
+        if (x1n, y1n) == (x2n, y2n):
+            return CRASH_PENALTY
+        
+        # grid reward (player 1 perspective)
+        r += self.grid_reward[x1n, y1n]
+
+        # living cost
+        r -= LIVING_COST
+
+        # penalize staying in place
+        if (x1n, y1n) == (x1, y1):
+            r += STAY_PENALTY
+
+        if (x2n, y2n) == (x2, y2):
+            r -= STAY_PENALTY   # zero-sum symmetry
+
+        return r
+
 
     
 def check_ne(Q, pi1, pi2, value, tol=1e-3):
@@ -265,48 +301,100 @@ def deterministic_policy(Pi1, Pi2):
         policy[s] = (a1, a2)
     return policy
 
+def stochastic_policy(Pi1, Pi2, eps=1e-12):
+    policy = {}
+    for s in Pi1:
+        pi1 = Pi1[s].copy()
+        pi2 = Pi2[s].copy()
+
+        pi1 = np.maximum(pi1, 0)
+        pi2 = np.maximum(pi2, 0)
+
+        if pi1.sum() < eps:
+            pi1 = np.ones(len(A)) / len(A)
+        else:
+            pi1 /= pi1.sum()
+
+        if pi2.sum() < eps:
+            pi2 = np.ones(len(A)) / len(A)
+        else:
+            pi2 /= pi2.sum()
+
+        policy[s] = (
+            lambda pi=pi1: np.random.choice(A, p=pi),
+            lambda pi=pi2: np.random.choice(A, p=pi)
+        )
+    return policy
+
+
 def rollout(env, s0, policy, T=30):
-    """
-    Roll out an equilibrium trajectory from an initial state
-    """
     traj = [s0]
     s = s0
     for _ in range(T):
-        a1, a2 = policy[s]
+        a1 = policy[s][0]()
+        a2 = policy[s][1]()
         s = env.transition(s, a1, a2)
         traj.append(s)
-        if (s[0], s[1]) == (s[2], s[3]):  # collision, stop
-            break
     return traj
 
-def plot_trajectory(traj, grid_size, title=""):
-    """
-    do the actual plotting of the trajectory into the grid
-    """
-    # Set up grid-world plotting area
-    fig, ax = plt.subplots()
+def draw_trajectory(ax, traj, grid_size, title="", subtitle=""):
+    ax.clear()
     ax.set_xlim(0, grid_size)
     ax.set_ylim(0, grid_size)
     ax.set_xticks(range(grid_size + 1))
     ax.set_yticks(range(grid_size + 1))
     ax.grid(True)
     ax.set_aspect("equal")
-    ax.set_title(title)
+    ax.set_title(subtitle, fontsize=10, color="gray", pad=6)
+
+    offset = 0.12
+    off1 = np.array([ offset,  offset])   # Player 1 (red)
+    off2 = np.array([-offset, -offset])   # Player 2 (blue)
 
     for s, s_next in zip(traj[:-1], traj[1:]):
+
         # Player 1
-        x, y = s[0], s[1]
-        xn, yn = s_next[0], s_next[1]
-        ax.arrow(x + 0.5, y + 0.5, xn - x, yn - y,
-                 head_width=0.15, color="black", length_includes_head=True)
+        p1_start = np.array([s[0] + 0.5, s[1] + 0.5]) + off1
+        p1_end   = np.array([s_next[0] + 0.5, s_next[1] + 0.5]) + off1
+        d1 = p1_end - p1_start
+
+        if np.linalg.norm(d1) > 1e-6:
+            ax.arrow(
+                p1_start[0], p1_start[1],
+                d1[0], d1[1],
+                color="red",
+                head_width=0.15,
+                length_includes_head=True
+            )
 
         # Player 2
-        x, y = s[2], s[3]
-        xn, yn = s_next[2], s_next[3]
-        ax.arrow(x + 0.5, y + 0.5, xn - x, yn - y,
-                 head_width=0.15, color="gray", length_includes_head=True)
+        p2_start = np.array([s[2] + 0.5, s[3] + 0.5]) + off2
+        p2_end   = np.array([s_next[2] + 0.5, s_next[3] + 0.5]) + off2
+        d2 = p2_end - p2_start
 
-    plt.show()
+        if np.linalg.norm(d2) > 1e-6:
+            ax.arrow(
+                p2_start[0], p2_start[1],
+                d2[0], d2[1],
+                color="blue",
+                head_width=0.15,
+                length_includes_head=True
+            )
+
+def trajectory_stats(traj):
+    p1_moves = 0
+    p2_moves = 0
+
+    for s, s_next in zip(traj[:-1], traj[1:]):
+        if (s[0], s[1]) != (s_next[0], s_next[1]):
+            p1_moves += 1
+        if (s[2], s[3]) != (s_next[2], s_next[3]):
+            p2_moves += 1
+
+    total_moves = len(traj) - 1
+    unique_states = len(set(traj))
+
+    return total_moves, p1_moves, p2_moves, unique_states
 
 
 # Run the car game
@@ -346,13 +434,69 @@ if __name__ == "__main__":
     print(f"Max epsilon: {max(epsilons):.6f}")
     print(f"Mean epsilon: {np.mean(epsilons):.6f}")
 
-    policy = deterministic_policy(Pi1, Pi2)
+    states = env.states
+    policy = stochastic_policy(Pi1, Pi2)
 
-    #s0 = (0, 0, 2, 0)
-    s0 = (1, 2, 2, 2)
-    traj = rollout(env, s0, policy)
+    trajectories = [
+        rollout(env, s, policy, T=20)
+        for s in states
+    ]
 
-    plot_trajectory(traj, env.grid_size, title=f"NE trajectory from {s0}")
+
+    fig, ax = plt.subplots()
+    plt.subplots_adjust(bottom=0.2)
+
+    idx = [0]  # mutable closure (IMPORTANT)
+
+    def update():
+        s = states[idx[0]]
+        traj = trajectories[idx[0]]
+
+        total, p1, p2, uniq = trajectory_stats(traj)
+
+        subtitle = (
+            f"Total moves: {total} | "
+            f"P1 moves: {p1} | "
+            f"P2 moves: {p2} | "
+            f"Unique states: {uniq}"
+        )
+
+        draw_trajectory(
+            ax,
+            traj,
+            env.grid_size,
+            title=f"NE trajectory from {s}", # future proofing, might use it instead later
+            subtitle=subtitle
+        )
+
+        fig.suptitle(
+            f"NE trajectory from {s}",
+            fontsize=16,
+            y=0.97
+        )
+        fig.canvas.draw_idle()
+
+    def next_state(event):
+        idx[0] = (idx[0] + 1) % len(states)
+        update()
+
+    def prev_state(event):
+        idx[0] = (idx[0] - 1) % len(states)
+        update()
+
+    axprev = plt.axes([0.25, 0.05, 0.1, 0.075])
+    axnext = plt.axes([0.65, 0.05, 0.1, 0.075])
+
+    bprev = Button(axprev, "Prev")
+    bnext = Button(axnext, "Next")
+
+    bprev.on_clicked(prev_state)
+    bnext.on_clicked(next_state)
+
+    update()
+    plt.show()
+
+
 
     
 
