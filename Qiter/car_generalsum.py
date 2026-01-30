@@ -7,8 +7,10 @@ from matplotlib.widgets import Button
 # Hyperparameters
 GAMMA = 0.9
 TOL = 1e-3
-MAX_Q_ITERS = 200
-FP_ITERS = 200
+MAX_Q_ITERS = 100
+FP_ITERS = 100
+
+GRID_SIZE = 5
 
 CRASH_PENALTY = -10.0
 STAY_PENALTY = -5.0
@@ -35,37 +37,6 @@ def best_response(Q, opp_policy):
     pi[a] = 1.0
     return pi
 
-def fictitious_play(Q, iters):
-    """
-    Solves NE(Q) for zero-sum game using FP
-    """
-
-    # initialize mixed strategies uniformly / num of acts
-    n = Q.shape[0]
-    pi1 = np.ones(n) / n
-    pi2 = np.ones(n) / n
-
-    # get histograms of action count
-    hist1 = np.zeros(n)
-    hist2 = np.zeros(n)
-
-    for t in range(1, iters + 1):
-        # best response to opponent's current empirical strategy
-        br1 = best_response(Q, pi2)
-        br2 = best_response(-Q.T, pi1)
-
-        # update counts
-        hist1 += br1
-        hist2 += br2
-
-        # convert counts into mixed strategies
-        pi1 = hist1 / t
-        pi2 = hist2 / t
-
-    # game val under strats
-    value = pi1 @ Q @ pi2
-    return value, pi1, pi2, "fict"
-
 def pure_nash_equilibria(Q, tol=1e-9):
     """
     Returns list of pure NE (a1, a2)
@@ -87,23 +58,37 @@ def pure_nash_equilibria(Q, tol=1e-9):
 
     return nes
 
-def solve_stage_game(Q):
-    """
-    Solve the stage game using a pure Nash equilibrium if one exists
-    """
-    pure_nes = pure_nash_equilibria(Q)
+def pure_nash_equilibria_general(Q1, Q2, tol=1e-9):
+    n1, n2 = Q1.shape
+    nes = []
+
+    for a1 in range(n1):
+        for a2 in range(n2):
+            if (Q1[a1, a2] >= np.max(Q1[:, a2]) - tol and
+                Q2[a1, a2] >= np.max(Q2[a1, :]) - tol):
+                nes.append((a1, a2))
+
+    return nes
+
+def solve_stage_game_general(Q1, Q2):
+    pure_nes = pure_nash_equilibria_general(Q1, Q2)
 
     if pure_nes:
-        a1, a2 = max(pure_nes, key=lambda pair: Q[pair])
-        n = Q.shape[0]
+        a1, a2 = max(pure_nes, key=lambda p: Q1[p] + Q2[p])
 
-        pi1 = np.zeros(n); pi1[a1] = 1.0
-        pi2 = np.zeros(n); pi2[a2] = 1.0
-        value = Q[a1, a2]
+        pi1 = np.zeros(Q1.shape[0]); pi1[a1] = 1.0
+        pi2 = np.zeros(Q2.shape[1]); pi2[a2] = 1.0
 
-        return value, pi1, pi2, "pure"
-    
-    return None
+        return (Q1[a1, a2], Q2[a1, a2]), pi1, pi2, "pure"
+
+    # independent best responses (not zero-sum FP)
+    pi1 = best_response(Q1, np.ones(Q2.shape[1]) / Q2.shape[1])
+    pi2 = best_response(Q2.T, np.ones(Q1.shape[0]) / Q1.shape[0])
+
+    v1 = pi1 @ Q1 @ pi2
+    v2 = pi1 @ Q2 @ pi2
+
+    return (v1, v2), pi1, pi2, "br"
 
 def make_grid_reward(n, R_max=5.0, alpha=1.0):
     c = (n - 1) / 2
@@ -125,9 +110,6 @@ class CarGame:
     def __init__(self, grid_size=3):
         self.grid_size = grid_size
         self.states = self._all_states()
-
-        self.grid_reward = make_grid_reward(grid_size, R_max=5.0, alpha=1.0)
-
 
     def _all_states(self):
         S = []
@@ -158,31 +140,64 @@ class CarGame:
         return (x1, y1, x2, y2)
 
     def reward(self, s, a1, a2):
-        r = 0.0 # total reward
-
-        # current state
         x1, y1, x2, y2 = s
-        # next state
         x1n, y1n, x2n, y2n = self.transition(s, a1, a2)
 
-        # crash
-        if (x1n, y1n) == (x2n, y2n):
-            return CRASH_PENALTY
-        
-        # grid reward (player 1 perspective)
-        r += self.grid_reward[x1n, y1n]
+        collide = (x1n, y1n) == (x2n, y2n)
 
-        # living cost
-        r -= LIVING_COST
+        # Terminal collision
+        if collide:
+            return 10.0, -10.0
 
-        # penalize staying in place
+        # Manhattan distance
+        dist = abs(x1n - x2n) + abs(y1n - y2n)
+
+        # Base incentives
+        r1 = -0.2 * dist + 0.1 * self.grid_reward[x1n, y1n]
+        r2 = +0.2 * dist + 0.1 * self.grid_reward[x2n, y2n]
+
+        # Living cost (BOTH players)
+        r1 -= LIVING_COST
+        r2 -= LIVING_COST
+
+        # Stay penalties (INDEPENDENT — no symmetry)
         if (x1n, y1n) == (x1, y1):
-            r += STAY_PENALTY
-
+            r1 += STAY_PENALTY
         if (x2n, y2n) == (x2, y2):
-            r -= STAY_PENALTY   # zero-sum symmetry
+            r2 += STAY_PENALTY
 
-        return r
+        return r1, r2
+
+class GeneralSumCarGame(CarGame):
+    """
+    General-sum variant:
+    P1 wants to collide
+    P2 wants to avoid collision
+    """
+    def __init__(self, grid_size=5):
+        super().__init__(grid_size)
+        self.grid_reward = make_grid_reward(grid_size, R_max=1.0, alpha=0.2)
+
+    def reward(self, s, a1, a2):
+        s_next = self.transition(s, a1, a2)
+        x1, y1, x2, y2 = s_next
+
+        collide = (x1, y1) == (x2, y2)
+
+        # Manhattan distance between players
+        dist = abs(x1 - x2) + abs(y1 - y2)
+
+        if collide:
+            r1 = 10.0
+            r2 = -10.0
+        else:
+            # P1 wants to minimize distance
+            r1 = -0.2 * dist + 0.1 * self.grid_reward[x1, y1]
+
+            # P2 wants to maximize distance
+            r2 = +0.2 * dist + 0.1 * self.grid_reward[x2, y2]
+
+        return r1, r2
 
 
     
@@ -226,92 +241,74 @@ def max_deviation(Q, pi1, pi2, value):
 
     return max_dev
 
+def argmax_random_tie(p):
+    """
+    Select an action from a mixed strategy with random tie-breaking
+    """
+    m = np.max(p)
+    return np.random.choice(np.where(np.abs(p - m) < 1e-9)[0])
+
 # Markov Game Q-Iteration
-def markov_game_q_iteration(env):
-    """
-    Q-iteration for a zero-sum Markov game.
-    Tries to solve each stage game exactly first (pure NE),
-    falls back to fictitious play if needed.
-    """
 
-    Q = defaultdict(lambda: np.zeros((len(A), len(A))))
-    V = defaultdict(float)
+def markov_game_q_iteration_general(env):
+    Q1 = defaultdict(lambda: np.zeros((len(A), len(A))))
+    Q2 = defaultdict(lambda: np.zeros((len(A), len(A))))
 
-    Pi1 = {}
-    Pi2 = {}
+    V1 = defaultdict(float)
+    V2 = defaultdict(float)
+
+    Pi1, Pi2 = {}, {}
 
     for it in range(MAX_Q_ITERS):
         delta = 0.0
 
         for s in env.states:
-            Q_old = Q[s].copy()
+            V1_old, V2_old = V1[s], V2[s]
 
-            # Terminal collision state
             if (s[0], s[1]) == (s[2], s[3]):
-                Q[s][:] = 0.0
-                V[s] = 0.0
-                Pi1[s] = np.zeros(len(A))
-                Pi2[s] = np.zeros(len(A))
+                V1[s] = V2[s] = 0.0
                 continue
 
-
-            # Update stage-game Q(s)
             for a1 in A:
                 for a2 in A:
-                    r = env.reward(s, a1, a2)
+                    r1, r2 = env.reward(s, a1, a2)
                     s_next = env.transition(s, a1, a2)
-                    Q[s][a1, a2] = r + GAMMA * V[s_next]
 
-            # Solve the stage game
-            solution = solve_stage_game(Q[s])
+                    Q1[s][a1, a2] = r1 + GAMMA * V1[s_next]
+                    Q2[s][a1, a2] = r2 + GAMMA * V2[s_next]
 
-            if solution is not None:
-                V[s], pi1, pi2, method = solution
-            else:
-                V[s], pi1, pi2, method = fictitious_play(Q[s], FP_ITERS)
+            (v1, v2), pi1, pi2, method = solve_stage_game_general(Q1[s], Q2[s])
 
-            Pi1[s] = pi1
-            Pi2[s] = pi2
+            V1[s], V2[s] = v1, v2
+            Pi1[s], Pi2[s] = pi1, pi2
 
-            delta = max(delta, np.max(np.abs(Q[s] - Q_old)))
-
+            delta = max(delta,
+                        abs(V1[s] - V1_old),
+                        abs(V2[s] - V2_old))
         if it % 10 == 0:
-            print(f"Q-iter {it}, delta = {delta:.6f}")
+            print(f"Gen-sum iter {it}, delta = {delta:.6f}")
 
-        # Convergence check
         if delta < TOL:
-            print("Converged.")
+            print("Converged (heuristically).")
             break
 
-    return Q, V, Pi1, Pi2
+    return Q1, Q2, V1, V2, Pi1, Pi2
 
-def stochastic_policy(Pi1, Pi2, eps=1e-12):
+def stochastic_policy(Pi1, Pi2):
     policy = {}
     for s in Pi1:
-        pi1 = Pi1[s].copy()
-        pi2 = Pi2[s].copy()
-
-        pi1 = np.maximum(pi1, 0)
-        pi2 = np.maximum(pi2, 0)
-
-        if pi1.sum() < eps:
-            pi1 = np.ones(len(A)) / len(A)
-        else:
-            pi1 /= pi1.sum()
-
-        if pi2.sum() < eps:
-            pi2 = np.ones(len(A)) / len(A)
-        else:
-            pi2 /= pi2.sum()
-
+        pi1 = Pi1[s]
+        pi2 = Pi2[s]
         policy[s] = (
             lambda pi=pi1: np.random.choice(A, p=pi),
             lambda pi=pi2: np.random.choice(A, p=pi)
         )
     return policy
 
-
 def rollout(env, s0, policy, T=30):
+    """
+    Roll out an equilibrium trajectory from an initial state
+    """
     traj = [s0]
     s = s0
     for _ in range(T):
@@ -319,7 +316,10 @@ def rollout(env, s0, policy, T=30):
         a2 = policy[s][1]()
         s = env.transition(s, a1, a2)
         traj.append(s)
+        if (s[0], s[1]) == (s[2], s[3]):
+            break
     return traj
+
 
 def draw_trajectory(ax, traj, grid_size, title="", subtitle=""):
     ax.clear()
@@ -380,57 +380,26 @@ def trajectory_stats(traj):
 
     return total_moves, p1_moves, p2_moves, unique_states
 
-
 # Run the car game
 if __name__ == "__main__":
-    env = CarGame(grid_size=3)
-    Q, V, Pi1, Pi2 = markov_game_q_iteration(env)
+    env = GeneralSumCarGame(grid_size=GRID_SIZE)
+    Q1, Q2, V1, V2, Pi1_gs, Pi2_gs = markov_game_q_iteration_general(env)
 
-    # Inspect bes/worst state
-    best = max(V.items(), key=lambda x: x[1])
-    worst = min(V.items(), key=lambda x: x[1])
-
-    print("Best state:", best)
-    print("Worst state:", worst)
-
-    # NE DIAGNOSTICS
-    ne_true = 0
-    epsilons = []
-
-    for s in env.states:
-        # Check if there is a solution already, if not use FP
-        solution = solve_stage_game(Q[s])
-        if solution is not None:
-            value, pi1, pi2, method = solution
-        else:
-            value, pi1, pi2, method = fictitious_play(Q[s], FP_ITERS)
-
-        is_ne = check_ne(Q[s], pi1, pi2, value)
-        eps = max_deviation(Q[s], pi1, pi2, value)
-
-        if is_ne:
-            ne_true += 1
-        print(f"Epsilon = {eps:.6f} | State {s} | Method: {method} | NE: {is_ne}")
-        epsilons.append(eps)
-
-    print("\nNE diagnostics:")
-    print(f"NE states: {ne_true} / {len(env.states)}")
-    print(f"Max epsilon: {max(epsilons):.6f}")
-    print(f"Mean epsilon: {np.mean(epsilons):.6f}")
-
-    states = env.states
-    policy = stochastic_policy(Pi1, Pi2)
+    states = [
+        s for s in env.states
+        if not ((s[0], s[1]) == (s[2], s[3]))
+    ]
+    policy = stochastic_policy(Pi1_gs, Pi2_gs)
 
     trajectories = [
         rollout(env, s, policy, T=20)
         for s in states
     ]
 
-
     fig, ax = plt.subplots()
     plt.subplots_adjust(bottom=0.2)
 
-    idx = [0]  # mutable closure (IMPORTANT)
+    idx = [0]  # mutable index
 
     def update():
         s = states[idx[0]]
@@ -449,15 +418,15 @@ if __name__ == "__main__":
             ax,
             traj,
             env.grid_size,
-            title=f"NE trajectory from {s}", # future proofing, might use it instead later
             subtitle=subtitle
         )
 
         fig.suptitle(
-            f"NE trajectory from {s}",
+            f"General-sum trajectory from {s}",
             fontsize=16,
             y=0.97
         )
+
         fig.canvas.draw_idle()
 
     def next_state(event):
@@ -479,9 +448,3 @@ if __name__ == "__main__":
 
     update()
     plt.show()
-
-
-
-    
-
-    
