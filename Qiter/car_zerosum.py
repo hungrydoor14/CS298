@@ -16,6 +16,9 @@ CRASH_PENALTY = -10.0
 STAY_PENALTY = -5.0
 LIVING_COST = 1.0
 
+POLICY_REFRESH = 10      # re-solve NE every N iterations
+FP_ITERS_Q = 100         # cheap FP inside Q-iteration
+
 # Actions: Up, Down, Left, Right
 ACTIONS = ['U', 'D', 'L', 'R']
 A = list(range(len(ACTIONS)))
@@ -231,9 +234,13 @@ def max_deviation(Q, pi1, pi2, value):
 # Markov Game Q-Iteration
 def markov_game_q_iteration(env):
     """
-    Q-iteration for a zero-sum Markov game.
-    Tries to solve each stage game exactly first (pure NE),
-    falls back to fictitious play if needed.
+    Optimized Q-iteration for a zero-sum Markov game.
+
+    Key tricks (from notes):
+    - Solve NE(Q) occasionally
+    - Cache policies (pi1, pi2)
+    - Use V(s) = pi1^T Q(s) pi2 in between (fast)
+    - Compare equilibrium value vs best responses
     """
 
     Q = defaultdict(lambda: np.zeros((len(A), len(A))))
@@ -242,13 +249,16 @@ def markov_game_q_iteration(env):
     Pi1 = {}
     Pi2 = {}
 
+    POLICY_REFRESH = 10      # re-solve NE every N iterations
+    FP_ITERS_Q = 100         # cheap FP inside Q-iteration
+
     for it in range(MAX_Q_ITERS):
         delta = 0.0
 
         for s in env.states:
             Q_old = Q[s].copy()
 
-            # Terminal collision state
+            # terminal collision state
             if (s[0], s[1]) == (s[2], s[3]):
                 Q[s][:] = 0.0
                 V[s] = 0.0
@@ -256,36 +266,62 @@ def markov_game_q_iteration(env):
                 Pi2[s] = np.zeros(len(A))
                 continue
 
-
-            # Update stage-game Q(s)
+            # Bellman update for Q(s)
             for a1 in A:
                 for a2 in A:
                     r = env.reward(s, a1, a2)
                     s_next = env.transition(s, a1, a2)
                     Q[s][a1, a2] = r + GAMMA * V[s_next]
 
-            # Solve the stage game
-            solution = solve_stage_game(Q[s])
+            # STAGE GAME SOLVE / FAST PATH 
+            if it % POLICY_REFRESH == 0 or s not in Pi1:
+                # solve NE(Q) explicitly
+                solution = solve_stage_game(Q[s])
 
-            if solution is not None:
-                V[s], pi1, pi2, method = solution
+                if solution is not None:
+                    V[s], pi1, pi2, method = solution
+                else:
+                    V[s], pi1, pi2, method = fictitious_play(Q[s], FP_ITERS_Q)
+
+                # round policies to reduce policy space
+                pi1 = round_policy(pi1)
+                pi2 = round_policy(pi2)
+
+                Pi1[s] = pi1
+                Pi2[s] = pi2
+
             else:
-                V[s], pi1, pi2, method = fictitious_play(Q[s], FP_ITERS)
-
-            Pi1[s] = pi1
-            Pi2[s] = pi2
+                # FAST VALUE UPDATE
+                pi1 = Pi1[s]
+                pi2 = Pi2[s]
+                V[s] = pi1 @ Q[s] @ pi2
 
             delta = max(delta, np.max(np.abs(Q[s] - Q_old)))
 
+        # progress print
         if it % 10 == 0:
-            print(f"Q-iter {it}, delta = {delta:.6f}")
+            print(f"Q-iter {it:3d} | delta = {delta:.6f}")
 
-        # Convergence check
+        # convergence
         if delta < TOL:
             print("Converged.")
             break
 
     return Q, V, Pi1, Pi2
+
+def round_policy(pi, grid=(0.0, 1/3, 1/2, 2/3, 1.0)):
+    pi = np.array(pi, dtype=float)
+    rounded = np.zeros_like(pi)
+
+    for i, p in enumerate(pi):
+        rounded[i] = min(grid, key=lambda g: abs(g - p))
+
+    if rounded.sum() > 0:
+        rounded /= rounded.sum()
+    else:
+        rounded[:] = 1.0 / len(rounded)
+
+    return rounded
 
 def stochastic_policy(Pi1, Pi2, eps=1e-12):
     policy = {}
@@ -382,6 +418,26 @@ def trajectory_stats(traj):
 
     return total_moves, p1_moves, p2_moves, unique_states
 
+def equilibrium_vs_br_stats(Q, Pi1, Pi2, states):
+    stats = []
+
+    for s in states:
+        pi1 = Pi1[s]
+        pi2 = Pi2[s]
+
+        V_eq = pi1 @ Q[s] @ pi2
+
+        # best responses
+        BR1 = np.max(Q[s] @ pi2)          # player 1 maximizer
+        BR2 = np.min(pi1 @ Q[s])          # player 2 minimizer
+
+        gap_p1 = BR1 - V_eq
+        gap_p2 = V_eq - BR2
+        eps = max(gap_p1, gap_p2)
+
+        stats.append((V_eq, BR1, BR2, gap_p1, gap_p2, eps))
+
+    return stats
 
 # Run the car game
 if __name__ == "__main__":
@@ -412,7 +468,7 @@ if __name__ == "__main__":
 
         if is_ne:
             ne_true += 1
-        print(f"Epsilon = {eps:.6f} | State {s} | Method: {method} | NE: {is_ne}")
+        #print(f"Epsilon = {eps:.6f} | State {s} | Method: {method} | NE: {is_ne}")
         epsilons.append(eps)
 
     print("\nNE diagnostics:")
@@ -427,7 +483,6 @@ if __name__ == "__main__":
         rollout(env, s, policy, T=20)
         for s in states
     ]
-
 
     fig, ax = plt.subplots()
     plt.subplots_adjust(bottom=0.2)
