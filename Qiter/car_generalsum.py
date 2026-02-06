@@ -16,6 +16,9 @@ CRASH_PENALTY = -10.0
 STAY_PENALTY = -5.0
 LIVING_COST = 1.0
 
+POLICY_REFRESH = 10      # re-solve NE every N iterations
+FP_ITERS_Q = 100         # cheap FP inside Q-iteration
+
 # Actions: Up, Down, Left, Right
 ACTIONS = ['U', 'D', 'L', 'R']
 A = list(range(len(ACTIONS)))
@@ -277,10 +280,22 @@ def markov_game_q_iteration_general(env):
                     Q1[s][a1, a2] = r1 + GAMMA * V1[s_next]
                     Q2[s][a1, a2] = r2 + GAMMA * V2[s_next]
 
-            (v1, v2), pi1, pi2, method = solve_stage_game_general(Q1[s], Q2[s])
+            if it % POLICY_REFRESH == 0 or s not in Pi1:
+                (v1, v2), pi1, pi2, method = solve_stage_game_general(Q1[s], Q2[s])
 
-            V1[s], V2[s] = v1, v2
-            Pi1[s], Pi2[s] = pi1, pi2
+                pi1 = round_policy(pi1)
+                pi2 = round_policy(pi2)
+
+                Pi1[s], Pi2[s] = pi1, pi2
+                V1[s], V2[s] = v1, v2
+            else:
+                pi1 = Pi1[s]
+                pi2 = Pi2[s]
+
+                # FAST VALUE UPDATE
+                V1[s] = pi1 @ Q1[s] @ pi2
+                V2[s] = pi1 @ Q2[s] @ pi2
+
 
             delta = max(delta,
                         abs(V1[s] - V1_old),
@@ -293,6 +308,20 @@ def markov_game_q_iteration_general(env):
             break
 
     return Q1, Q2, V1, V2, Pi1, Pi2
+
+def round_policy(pi, grid=(0.0, 1/3, 1/2, 2/3, 1.0)):
+    pi = np.array(pi, dtype=float)
+    rounded = np.zeros_like(pi)
+
+    for i, p in enumerate(pi):
+        rounded[i] = min(grid, key=lambda g: abs(g - p))
+
+    if rounded.sum() > 0:
+        rounded /= rounded.sum()
+    else:
+        rounded[:] = 1.0 / len(rounded)
+
+    return rounded
 
 def stochastic_policy(Pi1, Pi2):
     policy = {}
