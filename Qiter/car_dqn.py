@@ -4,6 +4,7 @@ import torch.optim as optim
 import numpy as np
 import random
 from collections import deque
+import matplotlib.pyplot as plt
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -182,6 +183,35 @@ def train_dqn(env, episodes=3000, T=30):
 
     return net, losses
 
+def dqn_policy(net, env, eps=0.0):
+    """
+    Wraps a trained DQN into a (pi1, pi2) policy
+    compatible with rollout().
+    """
+    policy = {}
+
+    for s in env.states:
+        s_tensor = encode_state(s, env.grid_size)
+
+        with torch.no_grad():
+            q_vals = net(s_tensor).cpu().numpy()
+
+        # Player 1: greedy (or epsilon-greedy if you want)
+        def p1_action(q=q_vals):
+            if np.random.rand() < eps:
+                return np.random.choice(len(A))
+            return np.argmax(q)
+
+        # Player 2: worst-case adversary
+        def p2_action(q=q_vals):
+            return np.argmin(q)
+
+
+        policy[s] = (p1_action, p2_action)
+
+    return policy
+
+
 def make_grid_reward(n, R_max=5.0, alpha=1.0):
     c = (n - 1) / 2
     grid = np.zeros((n, n))
@@ -259,21 +289,154 @@ class CarGame:
             r -= STAY_PENALTY   # zero-sum symmetry
 
         return r
+    
+def rollout(env, s0, policy, T=30):
+    traj = [s0]
+    s = s0
+    for _ in range(T):
+        a1 = policy[s][0]()
+        a2 = policy[s][1]()
+        s = env.transition(s, a1, a2)
+        traj.append(s)
+    return traj
 
+def draw_trajectory(ax, traj, grid_size, title="", subtitle=""):
+    ax.clear()
+    ax.set_xlim(0, grid_size)
+    ax.set_ylim(0, grid_size)
+    ax.set_xticks(range(grid_size + 1))
+    ax.set_yticks(range(grid_size + 1))
+    ax.grid(True)
+    ax.set_aspect("equal")
+    ax.set_title(subtitle, fontsize=10, color="gray", pad=6)
+
+    offset = 0.12
+    off1 = np.array([ offset,  offset])   # Player 1 (red)
+    off2 = np.array([-offset, -offset])   # Player 2 (blue)
+
+    for s, s_next in zip(traj[:-1], traj[1:]):
+
+        # Player 1
+        p1_start = np.array([s[0] + 0.5, s[1] + 0.5]) + off1
+        p1_end   = np.array([s_next[0] + 0.5, s_next[1] + 0.5]) + off1
+        d1 = p1_end - p1_start
+
+        if np.linalg.norm(d1) > 1e-6:
+            ax.arrow(
+                p1_start[0], p1_start[1],
+                d1[0], d1[1],
+                color="red",
+                head_width=0.15,
+                length_includes_head=True
+            )
+
+        # Player 2
+        p2_start = np.array([s[2] + 0.5, s[3] + 0.5]) + off2
+        p2_end   = np.array([s_next[2] + 0.5, s_next[3] + 0.5]) + off2
+        d2 = p2_end - p2_start
+
+        if np.linalg.norm(d2) > 1e-6:
+            ax.arrow(
+                p2_start[0], p2_start[1],
+                d2[0], d2[1],
+                color="blue",
+                head_width=0.15,
+                length_includes_head=True
+            )
+
+def trajectory_stats(traj):
+    p1_moves = 0
+    p2_moves = 0
+
+    for s, s_next in zip(traj[:-1], traj[1:]):
+        if (s[0], s[1]) != (s_next[0], s_next[1]):
+            p1_moves += 1
+        if (s[2], s[3]) != (s_next[2], s_next[3]):
+            p2_moves += 1
+
+    total_moves = len(traj) - 1
+    unique_states = len(set(traj))
+
+    return total_moves, p1_moves, p2_moves, unique_states
 
 if __name__ == "__main__":
     env = CarGame(grid_size=GRID_SIZE)
 
+    # ---- TRAIN ----
     dqn, losses = train_dqn(env)
 
     avg_len = evaluate_policy(env, dqn, episodes=100)
     print(f"Final greedy policy avg episode length: {avg_len:.2f}")
 
-    import matplotlib.pyplot as plt
+    # ---- BUILD DQN ROLLOUTS FOR ALL STATES ----
+    policy = dqn_policy(dqn, env)
+
+    states = env.states
+    trajectories = [
+        rollout(env, s, policy, T=20)
+        for s in states
+    ]
+
+    # ---- INTERACTIVE VIEWER ----
+    from matplotlib.widgets import Button
+
+    fig, ax = plt.subplots()
+    plt.subplots_adjust(bottom=0.2)
+
+    idx = [0]  # mutable index
+
+    def update():
+        s = states[idx[0]]
+        traj = trajectories[idx[0]]
+
+        total, p1, p2, uniq = trajectory_stats(traj)
+
+        subtitle = (
+            f"Total moves: {total} | "
+            f"P1 moves: {p1} | "
+            f"P2 moves: {p2} | "
+            f"Unique states: {uniq}"
+        )
+
+        draw_trajectory(
+            ax,
+            traj,
+            env.grid_size,
+            subtitle=subtitle
+        )
+
+        fig.suptitle(
+            f"DQN rollout from {s}",
+            fontsize=16,
+            y=0.97
+        )
+
+        fig.canvas.draw_idle()
+
+    def next_state(event):
+        idx[0] = (idx[0] + 1) % len(states)
+        update()
+
+    def prev_state(event):
+        idx[0] = (idx[0] - 1) % len(states)
+        update()
+
+    axprev = plt.axes([0.25, 0.05, 0.1, 0.075])
+    axnext = plt.axes([0.65, 0.05, 0.1, 0.075])
+
+    bprev = Button(axprev, "Prev")
+    bnext = Button(axnext, "Next")
+
+    bprev.on_clicked(prev_state)
+    bnext.on_clicked(next_state)
+
+    update()
+    plt.show()
+
+    # ---- LOSS CURVE ----
+    plt.figure()
     plt.plot(losses)
     plt.title("DQN training loss")
     plt.xlabel("Episode")
     plt.ylabel("Loss")
     plt.show()
-
-
