@@ -16,6 +16,8 @@ FP_ITERS = 800
 
 GRID_SIZE = 5
 
+EPS_LENGTH = 3000
+
 CRASH_PENALTY = -10.0 / 10
 STAY_PENALTY = -5.0 / 10
 LIVING_COST = 1.0 / 10
@@ -41,7 +43,7 @@ def encode_state(s, grid_size):
     )
 
 class DQN(nn.Module):
-    def __init__(self, state_dim=4, action_dim=4):
+    def __init__(self, state_dim=4, action_dim=16):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(state_dim, 64),
@@ -59,47 +61,68 @@ def opponent_policy(s):
 
 def evaluate_policy(env, net, episodes=50):
     lengths = []
+
     for _ in range(episodes):
         s = random.choice(env.states)
+
         for t in range(30):
+            s_tensor = encode_state(s, env.grid_size)
+
             with torch.no_grad():
-                a = torch.argmax(net(encode_state(s, env.grid_size))).item()
-            s, _, done = dqn_step(env, s, a)
+                q = net(s_tensor).view(4, 4)
+                min_over_a2 = torch.min(q, dim=1)[0]
+                a1 = torch.argmax(min_over_a2).item()
+                a2 = torch.argmin(q[a1]).item()
+
+            s_next = env.transition(s, a1, a2)
+            done = (s_next[0], s_next[1]) == (s_next[2], s_next[3])
+
+            s = s_next
+
             if done:
                 break
-        lengths.append(t+1)
+
+        lengths.append(t + 1)
+
     return np.mean(lengths)
 
-def dqn_step(env, s, a1):
-    a2 = opponent_policy(s)
+
+def dqn_step(env, s, a1, net):
+    s_tensor = encode_state(s, env.grid_size)
+    with torch.no_grad():
+        q = net(s_tensor).view(4, 4)
+        a2 = torch.argmin(q[a1]).item()
     r = env.reward(s, a1, a2)
     s_next = env.transition(s, a1, a2)
 
     done = (s_next[0], s_next[1]) == (s_next[2], s_next[3])
-    return s_next, r, done
+    return s_next, r, done, a2
 
 def select_action(net, s_tensor, eps):
     if np.random.rand() < eps:
-        return np.random.choice(len(A))
+        return np.random.choice(4)
+
     with torch.no_grad():
-        return torch.argmax(net(s_tensor)).item()
+        q = net(s_tensor).view(4, 4)
+        min_over_a2 = torch.min(q, dim=1)[0]
+        return torch.argmax(min_over_a2).item()
     
 class ReplayBuffer:
     def __init__(self, capacity=10000):
         self.buffer = deque(maxlen=capacity)
 
-    def push(self, s, a, r, s_next, done):
-        self.buffer.append((s, a, r, s_next, done))
+    def push(self, s, a1, a2, r, s_next, done):
+        self.buffer.append((s, a1, a2, r, s_next, done))
 
     def sample(self, batch_size):
         batch = random.sample(self.buffer, batch_size)
-        s, a, r, s_next, done = zip(*batch)
-        return s, a, r, s_next, done
+        s, a1, a2, r, s_next, done = zip(*batch)
+        return s, a1, a2, r, s_next, done
 
     def __len__(self):
         return len(self.buffer)
 
-def train_dqn(env, episodes=3000, T=30):
+def train_dqn(env, episodes=EPS_LENGTH, T=30):
     net = DQN().to(device)
     buffer = ReplayBuffer()
     BATCH_SIZE = 32
@@ -132,25 +155,36 @@ def train_dqn(env, episodes=3000, T=30):
 
             a = select_action(net, s_tensor, EPS)
 
-            s_next, r, done = dqn_step(env, s, a)
-            buffer.push(s, a, r, s_next, done)
+            s_next, r, done, a2 = dqn_step(env, s, a, net)
+            buffer.push(s, a, a2, r, s_next, done)
+
             s_next_tensor = encode_state(s_next, env.grid_size)
 
             if len(buffer) >= BATCH_SIZE:
-                states, actions, rewards, next_states, dones = buffer.sample(BATCH_SIZE)
+                states, a1_batch, a2_batch, rewards, next_states, dones = buffer.sample(BATCH_SIZE)
+
+                a1_batch = torch.tensor(a1_batch, device=device)
+                a2_batch = torch.tensor(a2_batch, device=device)
 
                 s_batch = torch.stack([encode_state(x, env.grid_size) for x in states])
-                a_batch = torch.tensor(actions, device=device)
                 r_batch = torch.tensor(rewards, dtype=torch.float32, device=device)
                 sn_batch = torch.stack([encode_state(x, env.grid_size) for x in next_states])
                 done_batch = torch.tensor(dones, dtype=torch.float32, device=device)
 
-                q_vals = net(s_batch).gather(1, a_batch.unsqueeze(1)).squeeze(1)
+                q_all = net(s_batch).view(-1, 4, 4)
+                q_vals = q_all[
+                    torch.arange(BATCH_SIZE),
+                    a1_batch,
+                    a2_batch
+                ]
 
                 with torch.no_grad():
                     # Minimax continuation value
-                    next_q = target_net(sn_batch)          # shape [B, |A|]
-                    v_next = torch.min(next_q, dim=1)[0]   # minimax value
+                    next_q = target_net(sn_batch).view(-1, 4, 4)
+
+                    min_over_a2 = torch.min(next_q, dim=2)[0]
+                    v_next = torch.max(min_over_a2, dim=1)[0]
+
                     target_vals = r_batch + GAMMA * v_next * (1 - done_batch)
 
                 loss = loss_fn(q_vals, target_vals)
@@ -194,18 +228,17 @@ def dqn_policy(net, env, eps=0.0):
         s_tensor = encode_state(s, env.grid_size)
 
         with torch.no_grad():
-            q_vals = net(s_tensor).cpu().numpy()
+            q = net(s_tensor).view(4,4)
 
-        # Player 1: greedy (or epsilon-greedy if you want)
-        def p1_action(q=q_vals):
-            if np.random.rand() < eps:
-                return np.random.choice(len(A))
-            return np.argmax(q)
+        min_over_a2 = torch.min(q, dim=1)[0]
+        a1_star = torch.argmax(min_over_a2).item()
+        a2_star = torch.argmin(q[a1_star]).item()
 
-        # Player 2: worst-case adversary
-        def p2_action(q=q_vals):
-            return np.argmin(q)
+        def p1_action(a=a1_star):
+            return a
 
+        def p2_action(a=a2_star):
+            return a
 
         policy[s] = (p1_action, p2_action)
 
@@ -314,7 +347,15 @@ def draw_trajectory(ax, traj, grid_size, title="", subtitle=""):
     off1 = np.array([ offset,  offset])   # Player 1 (red)
     off2 = np.array([-offset, -offset])   # Player 2 (blue)
 
-    for s, s_next in zip(traj[:-1], traj[1:]):
+    total_steps = len(traj) - 1
+
+    for i, (s, s_next) in enumerate(zip(traj[:-1], traj[1:])):
+
+        # alpha grows over time
+        if i == total_steps - 1:
+            alpha = 1.0
+        else:
+            alpha = 0.2 + 0.6 * (i / total_steps)
 
         # Player 1
         p1_start = np.array([s[0] + 0.5, s[1] + 0.5]) + off1
@@ -326,6 +367,7 @@ def draw_trajectory(ax, traj, grid_size, title="", subtitle=""):
                 p1_start[0], p1_start[1],
                 d1[0], d1[1],
                 color="red",
+                alpha=alpha,
                 head_width=0.15,
                 length_includes_head=True
             )
@@ -340,9 +382,11 @@ def draw_trajectory(ax, traj, grid_size, title="", subtitle=""):
                 p2_start[0], p2_start[1],
                 d2[0], d2[1],
                 color="blue",
+                alpha=alpha,
                 head_width=0.15,
                 length_includes_head=True
             )
+
 
 def trajectory_stats(traj):
     p1_moves = 0
@@ -362,13 +406,13 @@ def trajectory_stats(traj):
 if __name__ == "__main__":
     env = CarGame(grid_size=GRID_SIZE)
 
-    # ---- TRAIN ----
+    # TRAIN 
     dqn, losses = train_dqn(env)
 
     avg_len = evaluate_policy(env, dqn, episodes=100)
     print(f"Final greedy policy avg episode length: {avg_len:.2f}")
 
-    # ---- BUILD DQN ROLLOUTS FOR ALL STATES ----
+    # BUILD DQN ROLLOUTS FOR ALL STATES 
     policy = dqn_policy(dqn, env)
 
     states = env.states
@@ -377,7 +421,7 @@ if __name__ == "__main__":
         for s in states
     ]
 
-    # ---- INTERACTIVE VIEWER ----
+    # INTERACTIVE VIEWER 
     from matplotlib.widgets import Button
 
     fig, ax = plt.subplots()
@@ -433,7 +477,7 @@ if __name__ == "__main__":
     update()
     plt.show()
 
-    # ---- LOSS CURVE ----
+    # LOSS CURVE
     plt.figure()
     plt.plot(losses)
     plt.title("DQN training loss")
