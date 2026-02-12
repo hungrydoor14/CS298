@@ -14,11 +14,11 @@ TOL = 1e-3
 MAX_Q_ITERS = 200
 FP_ITERS = 800
 
-GRID_SIZE = 3
+GRID_SIZE = 5
 
-CRASH_PENALTY = -10.0
-STAY_PENALTY = -5.0
-LIVING_COST = 1.0
+CRASH_PENALTY = -10.0 / 10
+STAY_PENALTY = -5.0 / 10
+LIVING_COST = 1.0 / 10
 
 # Actions: Up, Down, Left, Right
 ACTIONS = ['U', 'D', 'L', 'R']
@@ -288,7 +288,7 @@ class CarGame:
         if (x2n, y2n) == (x2, y2):
             r -= STAY_PENALTY   # zero-sum symmetry
 
-        return r
+        return r / 10
     
 def rollout(env, s0, policy, T=30):
     traj = [s0]
