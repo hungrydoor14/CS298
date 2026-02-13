@@ -9,14 +9,12 @@ import matplotlib.pyplot as plt
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Hyperparameters
-GAMMA = 0.9
-TOL = 1e-4
-MAX_Q_ITERS = 200
-FP_ITERS = 800
+LR = 1e-3
+BATCH_SIZE = 64
 
 GRID_SIZE = 10
 
-EPS_LENGTH = 4000
+EPS_LENGTH = 6000
 
 CRASH_PENALTY = -1
 STAY_PENALTY = -0.5
@@ -46,6 +44,8 @@ def encode_state(s, grid_size):
 class DQN(nn.Module):
     def __init__(self, state_dim=4, action_dim=16):
         super().__init__()
+        # Approximates Q(s, a1, a2)
+        # Output size = 4x4 = 16 joint action values
         self.net = nn.Sequential(
             nn.Linear(state_dim, 64),
             nn.ReLU(),
@@ -100,12 +100,18 @@ def dqn_step(env, s, a1, net):
     return s_next, r, done, a2
 
 def select_action(net, s_tensor, eps):
+    # epsilon greedy exploration
     if np.random.rand() < eps:
         return np.random.choice(4)
 
     with torch.no_grad():
         q = net(s_tensor).view(4, 4)
+
+        # MINIMAX POLICY:
+
+        # Player 2 chooses action minimizing Q for each a1
         min_over_a2 = torch.min(q, dim=1)[0]
+        #Player 1 chooses action maximizing its guaranteed value
         return torch.argmax(min_over_a2).item()
     
 class ReplayBuffer:
@@ -126,14 +132,13 @@ class ReplayBuffer:
 def train_dqn(env, episodes=EPS_LENGTH, T=30):
     net = DQN().to(device)
     buffer = ReplayBuffer()
-    BATCH_SIZE = 64
 
     # TARGET NETWORK (freeze copy)
     target_net = DQN().to(device)
     target_net.load_state_dict(net.state_dict())
     target_net.eval()
 
-    optimizer = optim.Adam(net.parameters(), lr=1e-3)
+    optimizer = optim.Adam(net.parameters(), lr=LR)
     loss_fn = nn.MSELoss()
 
     TARGET_UPDATE = 50  # sync every 50 episodes
@@ -180,12 +185,16 @@ def train_dqn(env, episodes=EPS_LENGTH, T=30):
                 ]
 
                 with torch.no_grad():
-                    # Minimax continuation value
+                    # Compute Q(s', a1, a2) from target network
                     next_q = target_net(sn_batch).view(-1, 4, 4)
 
+                    # Player 2 best response (min over a2)
                     min_over_a2 = torch.min(next_q, dim=2)[0]
+
+                    # Player 1 maximizes guaranteed value (max over a1)
                     v_next = torch.max(min_over_a2, dim=1)[0]
 
+                    # Standard Bellman update with minimax continuation value
                     target_vals = r_batch + GAMMA * v_next * (1 - done_batch)
 
                 loss = loss_fn(q_vals, target_vals)
@@ -220,8 +229,9 @@ def train_dqn(env, episodes=EPS_LENGTH, T=30):
 
 def dqn_policy(net, env, eps=0.0):
     """
-    Wraps a trained DQN into a (pi1, pi2) policy
-    compatible with rollout().
+    Extract deterministic minimax policy from learned Q.
+    Player 1 uses max-min.
+    Player 2 uses best response (argmin).
     """
     policy = {}
 
@@ -231,12 +241,15 @@ def dqn_policy(net, env, eps=0.0):
         with torch.no_grad():
             q = net(s_tensor).view(4,4)
 
+        # Compute guaranteed value for each a1
         min_over_a2 = torch.min(q, dim=1)[0]
 
+        # Break ties randomly for stability
         vals = min_over_a2.cpu().numpy()
         best = np.where(vals == vals.max())[0]
         a1_star = np.random.choice(best)
 
+        # Player 2 best response
         a2_star = torch.argmin(q[a1_star]).item()
 
         def p1_action(a=a1_star):
@@ -303,7 +316,7 @@ class CarGame:
             x_new = min(self.grid_size - 1, x + 1)
             y_new = y
 
-        return x_new, y_new
+        return x_new, y_new 
 
         # If action results in no movement (boundary hit)
         if (x_new, y_new) == original:
@@ -339,6 +352,8 @@ class CarGame:
         return (x1, y1, x2, y2)
 
     def reward(self, s, a1, a2):
+        # Zero-sum reward from Player 1 perspective
+
         r = 0.0 # total reward
 
         # current state
@@ -445,6 +460,7 @@ def trajectory_stats(traj):
 
     return total_moves, p1_moves, p2_moves, unique_states
 
+# STATS SUGGESTED TO GET BY CHATGPT. 
 def saddle_gap_stats(net, env):
     gaps = []
 
