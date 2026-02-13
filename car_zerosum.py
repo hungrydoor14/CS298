@@ -10,11 +10,10 @@ TOL = 1e-3
 MAX_Q_ITERS = 200
 FP_ITERS = 800
 
-GRID_SIZE = 3
-
-CRASH_PENALTY = -10.0
-STAY_PENALTY = -5.0
-LIVING_COST = 1.0
+GRID_SIZE = 5
+CRASH_PENALTY = -1
+STAY_PENALTY = -0.5
+LIVING_COST = 0.1
 
 POLICY_REFRESH = 10      # re-solve NE every N iterations
 FP_ITERS_Q = 100         # cheap FP inside Q-iteration

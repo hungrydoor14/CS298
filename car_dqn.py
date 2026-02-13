@@ -10,17 +10,18 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Hyperparameters
 GAMMA = 0.9
-TOL = 1e-3
+TOL = 1e-4
 MAX_Q_ITERS = 200
 FP_ITERS = 800
 
-GRID_SIZE = 5
+GRID_SIZE = 10
 
-EPS_LENGTH = 3000
+EPS_LENGTH = 4000
 
-CRASH_PENALTY = -10.0 / 10
-STAY_PENALTY = -5.0 / 10
-LIVING_COST = 1.0 / 10
+CRASH_PENALTY = -1
+STAY_PENALTY = -0.5
+LIVING_COST = 0.1
+GRID_REWARD_MAX = 0.5
 
 # Actions: Up, Down, Left, Right
 ACTIONS = ['U', 'D', 'L', 'R']
@@ -125,7 +126,7 @@ class ReplayBuffer:
 def train_dqn(env, episodes=EPS_LENGTH, T=30):
     net = DQN().to(device)
     buffer = ReplayBuffer()
-    BATCH_SIZE = 32
+    BATCH_SIZE = 64
 
     # TARGET NETWORK (freeze copy)
     target_net = DQN().to(device)
@@ -231,7 +232,11 @@ def dqn_policy(net, env, eps=0.0):
             q = net(s_tensor).view(4,4)
 
         min_over_a2 = torch.min(q, dim=1)[0]
-        a1_star = torch.argmax(min_over_a2).item()
+
+        vals = min_over_a2.cpu().numpy()
+        best = np.where(vals == vals.max())[0]
+        a1_star = np.random.choice(best)
+
         a2_star = torch.argmin(q[a1_star]).item()
 
         def p1_action(a=a1_star):
@@ -245,13 +250,16 @@ def dqn_policy(net, env, eps=0.0):
     return policy
 
 
-def make_grid_reward(n, R_max=5.0, alpha=1.0):
+def make_grid_reward(n, R_max=0.5):
     c = (n - 1) / 2
+    max_dist = 2 * c  # max Manhattan distance
     grid = np.zeros((n, n))
+
     for x in range(n):
         for y in range(n):
             dist = abs(x - c) + abs(y - c)
-            grid[x, y] = R_max - alpha * dist
+            grid[x, y] = R_max * (1 - dist / max_dist)
+
     return grid
 
 class CarGame:
@@ -265,7 +273,7 @@ class CarGame:
         self.grid_size = grid_size
         self.states = self._all_states()
 
-        self.grid_reward = make_grid_reward(grid_size, R_max=5.0, alpha=1.0)
+        self.grid_reward = make_grid_reward(grid_size, R_max=GRID_REWARD_MAX)
 
 
     def _all_states(self):
@@ -279,16 +287,50 @@ class CarGame:
         return S
 
     def move(self, x, y, a):
-        # Apply grid movement with boundary conditions
+        original = (x, y)
+
+        # Try chosen action
         if a == 0:   # U
-            y = min(self.grid_size - 1, y + 1)
+            y_new = min(self.grid_size - 1, y + 1)
+            x_new = x
         elif a == 1: # D
-            y = max(0, y - 1)
+            y_new = max(0, y - 1)
+            x_new = x
         elif a == 2: # L
-            x = max(0, x - 1)
+            x_new = max(0, x - 1)
+            y_new = y
         elif a == 3: # R
-            x = min(self.grid_size - 1, x + 1)
-        return x, y
+            x_new = min(self.grid_size - 1, x + 1)
+            y_new = y
+
+        return x_new, y_new
+
+        # If action results in no movement (boundary hit)
+        if (x_new, y_new) == original:
+
+            # Get all valid moves that actually change position
+            valid_moves = []
+
+            for alt_a in range(4):
+                tx, ty = x, y
+
+                if alt_a == 0:
+                    ty = min(self.grid_size - 1, y + 1)
+                elif alt_a == 1:
+                    ty = max(0, y - 1)
+                elif alt_a == 2:
+                    tx = max(0, x - 1)
+                elif alt_a == 3:
+                    tx = min(self.grid_size - 1, x + 1)
+
+                if (tx, ty) != original:
+                    valid_moves.append((tx, ty))
+
+            # Choose one randomly
+            x_new, y_new = random.choice(valid_moves)
+
+        return x_new, y_new
+
 
     def transition(self, s, a1, a2):
         x1, y1, x2, y2 = s
@@ -321,7 +363,7 @@ class CarGame:
         if (x2n, y2n) == (x2, y2):
             r -= STAY_PENALTY   # zero-sum symmetry
 
-        return r / 10
+        return r 
     
 def rollout(env, s0, policy, T=30):
     traj = [s0]
@@ -403,11 +445,32 @@ def trajectory_stats(traj):
 
     return total_moves, p1_moves, p2_moves, unique_states
 
+def saddle_gap_stats(net, env):
+    gaps = []
+
+    for s in env.states:
+        s_tensor = encode_state(s, env.grid_size)
+        with torch.no_grad():
+            Q = net(s_tensor).view(4,4).cpu().numpy()
+
+        row_mins = Q.min(axis=1)
+        maximin = row_mins.max()
+
+        col_maxs = Q.max(axis=0)
+        minimax = col_maxs.min()
+
+        gaps.append(abs(maximin - minimax))
+
+    print("Avg saddle gap:", np.mean(gaps))
+    print("Max saddle gap:", np.max(gaps))
+
 if __name__ == "__main__":
     env = CarGame(grid_size=GRID_SIZE)
 
     # TRAIN 
     dqn, losses = train_dqn(env)
+
+    saddle_gap_stats(dqn, env)
 
     avg_len = evaluate_policy(env, dqn, episodes=100)
     print(f"Final greedy policy avg episode length: {avg_len:.2f}")
