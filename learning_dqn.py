@@ -11,6 +11,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # Hyperparameters
 LR = 1e-3
 BATCH_SIZE = 64
+SYNC = 25
 
 GRID_SIZE = 10
 
@@ -60,7 +61,7 @@ class DQN(nn.Module):
 def opponent_policy(s):
     return np.random.choice(A)
 
-def evaluate_policy(env, net, episodes=50):
+def evaluate_policy(env, net, episodes=SYNC):
     lengths = []
 
     for _ in range(episodes):
@@ -529,7 +530,7 @@ if __name__ == "__main__":
         )
 
         fig.suptitle(
-            f"DQN rollout from {s}",
+            f"Learning DQN rollout from {s}",
             fontsize=16,
             y=0.97
         )
@@ -559,7 +560,7 @@ if __name__ == "__main__":
     # LOSS CURVE
     plt.figure()
     plt.plot(losses)
-    plt.title("DQN training loss")
+    plt.title("Learning DQN training loss")
     plt.xlabel("Episode")
     plt.ylabel("Loss")
     plt.show()
