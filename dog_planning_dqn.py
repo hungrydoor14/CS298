@@ -1,9 +1,11 @@
 import numpy as np
 
 TIMEOUT_AMOUNT = 150
-NUM_ACTIONS = 8
+NUM_ACTIONS = 32
 STEP_SIZE = 0.05
-T = 20
+MAX_MOVE = 0.05 # theroetically None or [0,1.414]
+T = 50
+SET_HOUSE_POSITIONS = True
 
 class DogGame:
     def __init__(self, N_actions=8, step_size=0.05):
@@ -11,11 +13,16 @@ class DogGame:
         self.step = step_size
         self.angle_step = 2 * np.pi / self.N
 
-        self.blue_house = np.random.rand(2)
-        self.red_house  = np.random.rand(2)
+        # max_move = None -> unlimited (to boundary)
+        # max_move = float -> limited step size (to 1^2 or 1.414)
+        self.max_move = MAX_MOVE
 
-        self.blue_house = [0.25, 0.25]
-        self.red_house  = [0.75, 0.75]
+        if SET_HOUSE_POSITIONS:
+            self.blue_house = [0.25, 0.25]
+            self.red_house  = [0.75, 0.75]
+        else:
+            self.blue_house = np.random.rand(2)
+            self.red_house  = np.random.rand(2)
 
     def random_state(self):
         self.blue = np.random.rand(2)
@@ -35,20 +42,18 @@ class DogGame:
 
         self.t += 1
 
-        # --- Convert actions to direction vectors ---
+        # Convert actions to direction vectors 
         theta_b = self.action_to_angle(a_blue)
         theta_r = self.action_to_angle(a_red)
 
         dir_blue = np.array([np.cos(theta_b), np.sin(theta_b)])
         dir_red  = np.array([np.cos(theta_r), np.sin(theta_r)])
 
-        # --- Move blue as far as possible ---
-        self.blue = self._move_to_boundary(self.blue, dir_blue)
+        # Move player
+        self.blue = self._move_player(self.blue, dir_blue)
+        self.red  = self._move_player(self.red, dir_red)
 
-        # --- Move red as far as possible ---
-        self.red = self._move_to_boundary(self.red, dir_red)
-
-        # --- Dog jumps to midpoint ---
+        # Dog jumps to midpoint 
         self.dog = (self.blue + self.red) / 2.0
 
         done, r_b, r_r = self.check_terminal()
@@ -90,9 +95,9 @@ class DogGame:
                 dir_blue = np.array([np.cos(theta_b), np.sin(theta_b)])
                 dir_red  = np.array([np.cos(theta_r), np.sin(theta_r)])
 
-                # --- Simulate REAL movement ---
-                blue_sim = self._move_to_boundary(self.blue, dir_blue)
-                red_sim  = self._move_to_boundary(self.red,  dir_red)
+                # Simulate REAL movement 
+                blue_sim = self._move_player(self.blue, dir_blue)
+                red_sim  = self._move_player(self.red, dir_red)
 
                 dog_sim = (blue_sim + red_sim) / 2.0
 
@@ -119,8 +124,8 @@ class DogGame:
             dir_blue = np.array([np.cos(theta_b), np.sin(theta_b)])
             dir_red  = np.array([np.cos(theta_r), np.sin(theta_r)])
 
-            blue_sim = self._move_to_boundary(self.blue, dir_blue)
-            red_sim  = self._move_to_boundary(self.red,  dir_red)
+            blue_sim = self._move_player(self.blue, dir_blue)
+            red_sim  = self._move_player(self.red, dir_red)
 
             dog_sim = (blue_sim + red_sim) / 2.0
 
@@ -136,24 +141,30 @@ class DogGame:
         return best_blue_action, best_red_action
     
 
-    def _move_to_boundary(self, pos, direction):
+    def _move_player(self, pos, direction):
+        direction = direction / np.linalg.norm(direction)
 
-        t_candidates = []
+        if self.max_move is None:
+            # UNLIMITED: move to boundary
+            t_candidates = []
 
-        for i in range(2):
-            if direction[i] > 0:
-                t_candidates.append((1 - pos[i]) / direction[i])
-            elif direction[i] < 0:
-                t_candidates.append((0 - pos[i]) / direction[i])
+            for i in range(2):
+                if direction[i] > 0:
+                    t_candidates.append((1 - pos[i]) / direction[i])
+                elif direction[i] < 0:
+                    t_candidates.append((0 - pos[i]) / direction[i])
 
-        if len(t_candidates) == 0:
-            return pos
+            if len(t_candidates) == 0:
+                return pos
 
-        t_max = min(t_candidates)
+            t_max = min(t_candidates)
+            new_pos = pos + t_max * direction
 
-        new_pos = pos + t_max * direction
+        else:
+            # LIMITED: move fixed distance
+            new_pos = pos + self.max_move * direction
+
         return np.clip(new_pos, 0, 1)
-
 
 def build_payoff_matrix(env):
     M = np.zeros((env.N, env.N))
