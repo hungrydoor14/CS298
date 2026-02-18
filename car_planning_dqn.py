@@ -281,7 +281,6 @@ if __name__ == "__main__":
     update_plot()
     plt.show()
 
-
     plt.figure()
     plt.plot(loss)
     plt.title("Planning Loss")
