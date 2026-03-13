@@ -10,15 +10,16 @@ import torch.optim as optim
 
 import time
 
-GAMMA = 0.7
+GAMMA = 0.9
+STEPS = 150_000
+EPS_DECAY = 50_000
+LR = 1e-4
 
 STEP = 0.05
 NUM_ACTIONS = 16
 STEPS_PER_EPISODE = 150
-STEPS = 200_000
 WARMUP = 500
 BATCH_SIZE = 64
-LR = 1e-4
 CACHE_DECIMALS = 2
 
 def best_response_p1(Q1, p2, mask1):
@@ -207,7 +208,7 @@ def nash_actions(net1, net2, env, s_np, device):
 
 
 def train(env, steps=STEPS, warmup=WARMUP, batch_size=BATCH_SIZE, lr=LR,
-          eps_start=1.0, eps_end=0.05, eps_decay_steps=80_000,
+          eps_start=1.0, eps_end=0.05, eps_decay_steps=EPS_DECAY,
           target_sync=100, grad_clip=5.0, hidden=256, seed=0,
           device=None, cache_decimals=CACHE_DECIMALS):
     if device is None:
@@ -244,7 +245,7 @@ def train(env, steps=STEPS, warmup=WARMUP, batch_size=BATCH_SIZE, lr=LR,
             a1 = int(rng.integers(K))
             a2 = int(rng.integers(K))
         else:
-            a1, a2 = greedy_actions(net1, net2, env, s, device)
+            a1, a2 = nash_actions(net1, net2, env, s, device)
 
         sn, r1, r2, done = env.step_env(s, a1, a2)
         replay.add(s, a1, a2, r1, r2, sn, done)
@@ -494,38 +495,96 @@ def browse(env, net1, net2, N=100, T=120, seed=0, device=None):
 
 def export_weights_txt(net, filename):
     with open(filename, 'w') as f:
-        weights = [p for name, p in net.named_parameters() if 'weight' in name]
-        for i, W in enumerate(weights):
-            arr = W.detach().cpu().numpy().T  # transpose so W_ij = i->j
+        layers = []
+        current_weights = None
+        for name, p in net.named_parameters():
+            if 'weight' in name:
+                current_weights = p.detach().cpu().numpy()  # (out, in)
+            elif 'bias' in name:
+                bias = p.detach().cpu().numpy()  # (out,)
+                # each row = one output neuron: [w1, w2, ..., wn, bias]
+                combined = np.hstack([current_weights, bias.reshape(-1, 1)])  # (out, in+1)
+                layers.append(combined)
+        for i, arr in enumerate(layers):
             for row in arr:
                 f.write(','.join(f'{x:.6f}' for x in row) + '\n')
-            if i < len(weights) - 1:
+            if i < len(layers) - 1:
                 f.write('-----\n')
 
-# Main
-time1 = time.time()
+def load_weights_txt(net, filename, device=None):
+    """Load weights from file. Infers architecture from file shape — no metadata needed.
+    Pass net=None to auto-build the correctly-sized QNet from the file alone.
+    """
+    with open(filename, 'r') as f:
+        lines = f.readlines()
+ 
+    sections = []
+    current = []
+    for line in lines:
+        if '-----' in line:
+            sections.append(current); current = []
+        else:
+            current.append(line.strip())
+    sections.append(current)
+ 
+    arrays = []
+    for section in sections:
+        rows = [list(map(float, l.split(','))) for l in section if l]
+        arrays.append(np.array(rows))
+ 
+    if net is None:
+        # Infer from shapes: section 0 is (hidden, state_dim+1), last is (K*K, hidden+1)
+        state_dim = arrays[0].shape[1] - 1
+        hidden    = arrays[0].shape[0]
+        import math
+        K = int(round(math.sqrt(arrays[-1].shape[0])))
+        net = QNet(state_dim=state_dim, K=K, hidden=hidden)
+ 
+    if device is not None:
+        net = net.to(device)
+ 
+    params = list(net.named_parameters())
+    i = 0
+    for arr in arrays:
+        weights = arr[:, :-1]
+        bias    = arr[:, -1]
+        while i < len(params) and 'weight' not in params[i][0]:
+            i += 1
+        if i < len(params):
+            params[i][1].data = torch.tensor(weights, dtype=torch.float32).to(params[i][1].device)
+            i += 1
+        while i < len(params) and 'bias' not in params[i][0]:
+            i += 1
+        if i < len(params):
+            params[i][1].data = torch.tensor(bias, dtype=torch.float32).to(params[i][1].device)
+            i += 1
+ 
+    return net
 
-env = DogGame(
-    step=STEP,
-    K_dirs=NUM_ACTIONS,
-    add_stay=True,
-    house_r=0.03,
-    max_episode_steps=STEPS_PER_EPISODE,
-    seed=0,
-    houses_fixed=(0.25, 0.25, 0.75, 0.75),
-)
+if __name__ == "__main__":
+    time1 = time.time()
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
+    env = DogGame(
+        step=STEP,
+        K_dirs=NUM_ACTIONS,
+        add_stay=True,
+        house_r=0.03,
+        max_episode_steps=STEPS_PER_EPISODE,
+        seed=0,
+        houses_fixed=(0.25, 0.25, 0.75, 0.75),
+    )
 
-# train
-net1, net2, loss1_history, loss2_history = train(env)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
-# After training, save the weights
-export_weights_txt(net1, 'player1_weights.txt')
-export_weights_txt(net2, 'player2_weights.txt')
+    # train
+    net1, net2, loss1_history, loss2_history = train(env)
 
-time2 = time.time()
-print(f"Training time: {(time2 - time1) / 60:.1f} minutes")
+    # After training, save the weights
+    export_weights_txt(net1, 'player1_weights.txt')
+    export_weights_txt(net2, 'player2_weights.txt')
 
-plot_loss(loss1_history, loss2_history)
-browse(env, net1, net2, N=100, T=120, seed=0, device=device)
+    time2 = time.time()
+    print(f"Training time: {(time2 - time1) / 60:.1f} minutes")
+
+    plot_loss(loss1_history, loss2_history)
+    browse(env, net1, net2, N=100, T=120, seed=0, device=device)
