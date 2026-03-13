@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 from matplotlib.widgets import Button, TextBox
 import random
 from collections import deque, OrderedDict
+import nashpy as nash
 
 import torch
 import torch.nn as nn
@@ -10,15 +11,16 @@ import torch.optim as optim
 
 import time
 
-GAMMA = 0.9
-STEPS = 150_000
+GAMMA = 0.65
+STEPS = 100_000
 EPS_DECAY = 50_000
 LR = 1e-4
+N_ITERS = 30
 
 STEP = 0.05
-NUM_ACTIONS = 16
+NUM_ACTIONS = 8
 STEPS_PER_EPISODE = 150
-WARMUP = 500
+WARMUP = 5000
 BATCH_SIZE = 64
 CACHE_DECIMALS = 2
 
@@ -38,7 +40,7 @@ def best_response_p2(Q2, p1, mask2):
     p[j] = 1.0
     return p
 
-def solve_nash_gensum(Q1, Q2, mask1, mask2, n_iters=30):
+def solve_nash_gensum(Q1, Q2, mask1, mask2, n_iters=N_ITERS):
     p1 = mask1.astype(np.float64); p1 /= p1.sum()
     p2 = mask2.astype(np.float64); p2 /= p2.sum()
     for _ in range(n_iters):
@@ -47,7 +49,6 @@ def solve_nash_gensum(Q1, Q2, mask1, mask2, n_iters=30):
     v1 = float(p1 @ Q1 @ p2)
     v2 = float(p1 @ Q2 @ p2)
     return v1, v2, p1, p2
-
 
 class DogGame:
     def __init__(self, step=0.02, K_dirs=8, add_stay=False, house_r=0.03,
@@ -372,8 +373,8 @@ def draw_traj(ax, traj, env, title=None):
         ax.set_title(title, fontsize=9)
 
     h1x, h1y, h2x, h2y = map(float, traj[0][4:])
-    ax.scatter([h1x], [h1y], marker="s", s=200, color="blue", zorder=5, label="Blue House")
-    ax.scatter([h2x], [h2y], marker="s", s=200, color="red",  zorder=5, label="Red House")
+    ax.scatter([h1x], [h1y], marker="s", s=200, color="blue", zorder=5)
+    ax.scatter([h2x], [h2y], marker="s", s=200, color="red",  zorder=5)
 
     arr = np.array(traj)
     p1  = arr[:, :2]
@@ -398,7 +399,6 @@ def draw_traj(ax, traj, env, title=None):
     ax.scatter(*p1[0],  marker="o", s=60,  color="blue",  zorder=6)
     ax.scatter(*p2[0],  marker="o", s=60,  color="red",   zorder=6)
     ax.scatter(*dog[0], marker="x", s=100, color="black", zorder=6)
-    ax.legend(loc="lower left", fontsize=8)
 
 
 @torch.no_grad()
@@ -480,6 +480,9 @@ def browse(env, net1, net2, N=100, T=120, seed=0, device=None):
         draw_traj(ax_traj, traj, env, title=title)
         status.set_text("Prev / Next to browse rollouts. Policy fields are fixed.")
         fig.canvas.draw_idle()
+        final = traj[-1]
+        print(f"Final: blue=({final[0]:.3f},{final[1]:.3f}) red=({final[2]:.3f},{final[3]:.3f})")
+
 
     ax_prev = fig.add_axes([0.44, 0.05, 0.08, 0.07])
     ax_next = fig.add_axes([0.54, 0.05, 0.08, 0.07])

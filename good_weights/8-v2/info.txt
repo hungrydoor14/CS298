@@ -2,5 +2,7 @@ GAMMA = 0.9
 STEPS = 100_000
 EPS_DECAY = 50_000
 LR = 1e-4
+N_ITERS = 30
+
 
 Modification to get rid of "greedy" fix

@@ -4,7 +4,7 @@ importlib.reload(dqn)
 import torch
 
 folder = "good_weights"
-version = "16-v1"
+version = "8-v2"
 route = f"{folder}/{version}"
 
 
