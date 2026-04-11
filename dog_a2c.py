@@ -2,25 +2,22 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Button
 import random
-from collections import deque
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import time
 
 GAMMA = 0.65
-STEPS = 600_000
-EPS_DECAY = 300_000
+STEPS = 100_000
 LR = 1e-4
 
 STEP = 0.05
-NUM_ACTIONS = 16
+NUM_ACTIONS = 8
 STEPS_PER_EPISODE = 150
-WARMUP = 5000
-BATCH_SIZE = 64
 
 
-#  Environment (unchanged) 
+# ── Environment (unchanged) ───────────────────────────────────────────────────
+
 class DogGame:
     def __init__(self, step=0.02, K_dirs=8, add_stay=False, house_r=0.03,
                  max_episode_steps=150, seed=0, houses_fixed=(0.25, 0.25, 0.75, 0.75)):
@@ -82,165 +79,180 @@ class DogGame:
         return sn, r1, r2, done
 
 
-#  Networks 
-# Each agent has its own Q-network that maps state -> Q(s, a) for each of its K actions.
-# No joint action matrix needed.
+# ── Networks ──────────────────────────────────────────────────────────────────
 
-class QNet(nn.Module):
-    def __init__(self, state_dim=8, K=17, hidden=128):
+class ActorNet(nn.Module):
+    """Outputs a probability distribution over K actions."""
+    def __init__(self, state_dim=8, K=17, hidden=256):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(state_dim, hidden), nn.ReLU(),
             nn.Linear(hidden, hidden),    nn.ReLU(),
-            nn.Linear(hidden, K),         # K values, one per own action
+            nn.Linear(hidden, K),
         )
 
     def forward(self, s):
-        return self.net(s)  # (batch, K)
+        return torch.softmax(self.net(s), dim=-1)   # (batch, K)
 
 
-# Replay buffer (unchanged) 
+class CriticNet(nn.Module):
+    """Outputs a scalar state-value estimate V(s)."""
+    def __init__(self, state_dim=8, hidden=256):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(state_dim, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden),    nn.ReLU(),
+            nn.Linear(hidden, 1),
+        )
 
-class Replay:
-    def __init__(self, cap=100_000):
-        self.buf = deque(maxlen=cap)
-
-    def add(self, s, a1, a2, r1, r2, sn, done):
-        self.buf.append((s, a1, a2, r1, r2, sn, done))
-
-    def sample(self, n):
-        batch = random.sample(self.buf, n)
-        s, a1, a2, r1, r2, sn, done = zip(*batch)
-        return (np.stack(s), np.array(a1, dtype=np.int64), np.array(a2, dtype=np.int64),
-                np.array(r1, dtype=np.float32), np.array(r2, dtype=np.float32),
-                np.stack(sn), np.array(done, dtype=np.float32))
-
-    def __len__(self):
-        return len(self.buf)
+    def forward(self, s):
+        return self.net(s).squeeze(-1)              # (batch,)
 
 
-#  Helpers 
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-@torch.no_grad()
-def soft_update(tgt, src, tau=0.005):
-    for pt, ps in zip(tgt.parameters(), src.parameters()):
-        pt.data.mul_(1 - tau).add_(tau * ps.data)
+def sample_action(actor, s_np, device):
+    """Sample an action from the actor's distribution; also return log-prob."""
+    s = torch.tensor(s_np[None], dtype=torch.float32, device=device)
+    probs = actor(s)                                    # (1, K)
+    dist  = torch.distributions.Categorical(probs)
+    a     = dist.sample()                               # (1,)
+    return int(a.item()), dist.log_prob(a).squeeze(0)   # scalar log-prob
 
 
 @torch.no_grad()
-def greedy_actions(net1, net2, s_np, device):
-    """Pure greedy action selection (used at eval/rollout time)."""
+def greedy_action(actor, s_np, device):
+    """Greedy (mode) action for evaluation / rollout."""
     s = torch.tensor(s_np[None], dtype=torch.float32, device=device)
-    a1 = int(net1(s).argmax(dim=1).item())
-    a2 = int(net2(s).argmax(dim=1).item())
-    return a1, a2
+    return int(actor(s).argmax(dim=1).item())
 
 
-def eps_greedy(net, s_np, K, eps, rng, device):
-    """Epsilon-greedy for a single agent."""
-    if rng.random() < eps:
-        return int(rng.integers(K))
-    s = torch.tensor(s_np[None], dtype=torch.float32, device=device)
-    with torch.no_grad():
-        return int(net(s).argmax(dim=1).item())
+# ── Training ──────────────────────────────────────────────────────────────────
 
+def train(env, steps=STEPS, lr=LR,
+          actor_coef=1.0, critic_coef=0.5, entropy_coef=0.01,
+          grad_clip=5.0, hidden=256, seed=0, device=None):
+    """
+    Independent A2C for two agents.
 
-# Training 
+    Each agent owns:
+      - an actor  π(a | s; φ)
+      - a critic  V(s; θ)
 
-def train(env, steps=STEPS, warmup=WARMUP, batch_size=BATCH_SIZE, lr=LR,
-          eps_start=1.0, eps_end=0.05, eps_decay_steps=EPS_DECAY,
-          target_sync=100, grad_clip=5.0, hidden=256, seed=0, device=None):
+    At every environment step we compute a 1-step TD advantage and immediately
+    update both networks — no replay buffer needed (on-policy).
+
+    Loss per agent (Algorithm 14):
+      actor  loss = -Adv · log π(a | s)         (+ optional entropy bonus)
+      critic loss = (y - V(s))²
+    """
 
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    np.random.seed(seed); random.seed(seed); torch.manual_seed(seed)
+    torch.manual_seed(seed); np.random.seed(seed); random.seed(seed)
 
     K = env.K
 
-    # Each agent: online net + target net
-    net1  = QNet(state_dim=8, K=K, hidden=hidden).to(device)
-    net2  = QNet(state_dim=8, K=K, hidden=hidden).to(device)
-    tgt1  = QNet(state_dim=8, K=K, hidden=hidden).to(device)
-    tgt2  = QNet(state_dim=8, K=K, hidden=hidden).to(device)
-    tgt1.load_state_dict(net1.state_dict()); tgt1.eval()
-    tgt2.load_state_dict(net2.state_dict()); tgt2.eval()
+    # One actor + critic per agent
+    actor1  = ActorNet(state_dim=8, K=K, hidden=hidden).to(device)
+    critic1 = CriticNet(state_dim=8,    hidden=hidden).to(device)
+    actor2  = ActorNet(state_dim=8, K=K, hidden=hidden).to(device)
+    critic2 = CriticNet(state_dim=8,    hidden=hidden).to(device)
 
-    opt1 = optim.Adam(net1.parameters(), lr=lr)
-    opt2 = optim.Adam(net2.parameters(), lr=lr)
-
-    replay = Replay()
-    rng = np.random.default_rng(seed + 1)
+    # Joint optimisers (actor + critic parameters together per agent)
+    opt1 = optim.Adam(list(actor1.parameters()) + list(critic1.parameters()), lr=lr)
+    opt2 = optim.Adam(list(actor2.parameters()) + list(critic2.parameters()), lr=lr)
 
     s = env.reset()
-    loss1_history, loss2_history = [], []
+    actor_loss1_history, actor_loss2_history = [], []
 
     for t in range(1, steps + 1):
-        #  Epsilon schedule 
-        frac = min(1.0, t / eps_decay_steps)
-        eps  = eps_start + frac * (eps_end - eps_start)
 
-        #  Action selection: epsilon-greedy for BOTH agents 
-        a1 = eps_greedy(net1, s, K, eps, rng, device)
-        a2 = eps_greedy(net2, s, K, eps, rng, device)
+        # ── Step 6: sample actions from actor distributions ──────────────────
+        s_t = torch.tensor(s[None], dtype=torch.float32, device=device)
 
+        probs1 = actor1(s_t)                        # (1, K)
+        probs2 = actor2(s_t)
+        dist1  = torch.distributions.Categorical(probs1)
+        dist2  = torch.distributions.Categorical(probs2)
+        a1_t   = dist1.sample()
+        a2_t   = dist2.sample()
+        logp1  = dist1.log_prob(a1_t).squeeze(0)   # scalar
+        logp2  = dist2.log_prob(a2_t).squeeze(0)
+        a1, a2 = int(a1_t.item()), int(a2_t.item())
+
+        # ── Step 7: apply actions, observe r and s' ───────────────────────────
         sn, r1, r2, done = env.step_env(s, a1, a2)
-        replay.add(s, a1, a2, r1, r2, sn, done)
-        s = env.reset() if done else sn
 
-        if len(replay) < warmup:
-            continue
+        sn_t   = torch.tensor(sn[None], dtype=torch.float32, device=device)
+        r1_t   = torch.tensor(r1, dtype=torch.float32, device=device)
+        r2_t   = torch.tensor(r2, dtype=torch.float32, device=device)
 
-        #  Sample batch 
-        sb, a1b, a2b, r1b, r2b, snb, doneb = replay.sample(batch_size)
+        # ── Steps 8-13: compute TD targets and advantages ─────────────────────
+        v1_s   = critic1(s_t).squeeze(0)
+        v2_s   = critic2(s_t).squeeze(0)
 
-        sb_t   = torch.tensor(sb,    dtype=torch.float32, device=device)
-        snb_t  = torch.tensor(snb,   dtype=torch.float32, device=device)
-        r1b_t  = torch.tensor(r1b,   dtype=torch.float32, device=device)
-        r2b_t  = torch.tensor(r2b,   dtype=torch.float32, device=device)
-        done_t = torch.tensor(doneb, dtype=torch.float32, device=device)
-        a1b_t  = torch.tensor(a1b,   dtype=torch.int64,   device=device)
-        a2b_t  = torch.tensor(a2b,   dtype=torch.int64,   device=device)
-
-        # ── TD targets: standard Bellman backup, each agent independently ─
         with torch.no_grad():
-            v1_next = tgt1(snb_t).max(dim=1).values   # max over own actions
-            v2_next = tgt2(snb_t).max(dim=1).values
+            v1_sn = critic1(sn_t).squeeze(0)
+            v2_sn = critic2(sn_t).squeeze(0)
 
-        y1 = r1b_t + (1.0 - done_t) * GAMMA * v1_next
-        y2 = r2b_t + (1.0 - done_t) * GAMMA * v2_next
+        if done:
+            # Terminal: bootstrap value is 0  (Algorithm 14, lines 9-10)
+            y1    = r1_t
+            y2    = r2_t
+            adv1  = r1_t - v1_s
+            adv2  = r2_t - v2_s
+        else:
+            # Non-terminal: 1-step TD  (Algorithm 14, lines 12-13)
+            y1    = r1_t + GAMMA * v1_sn
+            y2    = r2_t + GAMMA * v2_sn
+            adv1  = (r1_t + GAMMA * v1_sn) - v1_s
+            adv2  = (r2_t + GAMMA * v2_sn) - v2_s
 
-        #  Update agent 1 
-        Q1_sa  = net1(sb_t).gather(1, a1b_t.unsqueeze(1)).squeeze(1)
-        loss1  = nn.functional.smooth_l1_loss(Q1_sa, y1)
+        # Detach advantages so actor gradient doesn't flow through critic
+        adv1 = adv1.detach()
+        adv2 = adv2.detach()
+
+        # ── Steps 14-17: compute losses and update ────────────────────────────
+        # Actor loss  = -Adv · log π(a|s)  (+ entropy regularisation bonus)
+        # Critic loss = (y - V(s))²
+        entropy1 = dist1.entropy().squeeze(0)
+        entropy2 = dist2.entropy().squeeze(0)
+
+        loss_actor1 = -adv1 * logp1 - entropy_coef * entropy1
+        loss_critic1 = (y1.detach() - v1_s) ** 2
+        loss1 = actor_coef * loss_actor1 + critic_coef * loss_critic1
+
+        loss_actor2 = -adv2 * logp2 - entropy_coef * entropy2
+        loss_critic2 = (y2.detach() - v2_s) ** 2
+        loss2 = actor_coef * loss_actor2 + critic_coef * loss_critic2
+
         opt1.zero_grad(); loss1.backward()
-        nn.utils.clip_grad_norm_(net1.parameters(), grad_clip)
+        nn.utils.clip_grad_norm_(
+            list(actor1.parameters()) + list(critic1.parameters()), grad_clip)
         opt1.step()
 
-        #  Update agent 2 
-        Q2_sa  = net2(sb_t).gather(1, a2b_t.unsqueeze(1)).squeeze(1)
-        loss2  = nn.functional.smooth_l1_loss(Q2_sa, y2)
         opt2.zero_grad(); loss2.backward()
-        nn.utils.clip_grad_norm_(net2.parameters(), grad_clip)
+        nn.utils.clip_grad_norm_(
+            list(actor2.parameters()) + list(critic2.parameters()), grad_clip)
         opt2.step()
 
-        #  Soft-update target nets 
-        if t % target_sync == 0:
-            soft_update(tgt1, net1)
-            soft_update(tgt2, net2)
+        actor_loss1_history.append(float(loss_actor1))
+        actor_loss2_history.append(float(loss_actor2))
 
-        loss1_history.append(float(loss1))
-        loss2_history.append(float(loss2))
+        s = env.reset() if done else sn
 
         if t % 500 == 0:
-            print(f"step {t:6d}  eps {eps:.3f}  "
-                  f"loss1 {float(loss1):.5f}  loss2 {float(loss2):.5f}  "
-                  f"replay {len(replay)}")
+            print(f"step {t:6d}  "
+                  f"actor_loss1 {float(loss_actor1):+.5f}  "
+                  f"actor_loss2 {float(loss_actor2):+.5f}  "
+                  f"adv1 {float(adv1):+.4f}  adv2 {float(adv2):+.4f}")
 
-    return net1, net2, loss1_history, loss2_history
+    return actor1, actor2, actor_loss1_history, actor_loss2_history
 
 
-#  Visualisation (unchanged except using greedy_actions) 
+# ── Visualisation ─────────────────────────────────────────────────────────────
 
 def plot_loss(loss1_history, loss2_history, window=500):
     fig, ax = plt.subplots(figsize=(10, 4))
@@ -254,19 +266,20 @@ def plot_loss(loss1_history, loss2_history, window=500):
         ax.plot(np.arange(len(s)) + window // 2, s, color="blue", lw=2, label="Player 1 (smoothed)")
         s = smooth(loss2_history, window)
         ax.plot(np.arange(len(s)) + window // 2, s, color="red",  lw=2, label="Player 2 (smoothed)")
-    ax.set_xlabel("Training step"); ax.set_ylabel("Loss")
-    ax.set_title("Training Loss"); ax.legend(); ax.set_yscale("log")
+    ax.set_xlabel("Training step"); ax.set_ylabel("Actor Loss")
+    ax.set_title("Training Actor Loss"); ax.legend()
     plt.tight_layout(); plt.show()
 
 
-def rollout(env, net1, net2, s0, T=100, device=None):
+def rollout(env, actor1, actor2, s0, T=100, device=None):
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
     s = env.reset(s0=s0)
     traj = [s.copy()]
     r1s, r2s = [], []
     for _ in range(T):
-        a1, a2 = greedy_actions(net1, net2, s, device)
+        a1 = greedy_action(actor1, s, device)
+        a2 = greedy_action(actor2, s, device)
         sn, r1, r2, done = env.step_env(s, a1, a2)
         traj.append(sn.copy()); r1s.append(r1); r2s.append(r2)
         s = sn
@@ -296,7 +309,7 @@ def draw_traj(ax, traj, env, title=None):
 
 
 @torch.no_grad()
-def draw_policy_field(ax_blue, ax_red, env, net1, net2, device, grid_n=15):
+def draw_policy_field(ax_blue, ax_red, env, actor1, actor2, device, grid_n=15):
     h1x, h1y, h2x, h2y = map(float, env.houses_fixed)
     lin = np.linspace(0.05, 0.95, grid_n)
     xs, ys = np.meshgrid(lin, lin)
@@ -304,9 +317,8 @@ def draw_policy_field(ax_blue, ax_red, env, net1, net2, device, grid_n=15):
     u1s, v1s, u2s, v2s = [], [], [], []
     for px, py in pts:
         s = np.array([px, py, 1-px, 1-py, h1x, h1y, h2x, h2y], dtype=np.float32)
-        s_t = torch.tensor(s[None], dtype=torch.float32, device=device)
-        a1 = int(net1(s_t).argmax(dim=1).item())
-        a2 = int(net2(s_t).argmax(dim=1).item())
+        a1 = greedy_action(actor1, s, device)
+        a2 = greedy_action(actor2, s, device)
         for a, us, vs in [(a1, u1s, v1s), (a2, u2s, v2s)]:
             if env.add_stay and a == env.stay_idx:
                 us.append(0.0); vs.append(0.0)
@@ -327,7 +339,7 @@ def draw_policy_field(ax_blue, ax_red, env, net1, net2, device, grid_n=15):
                   scale=1, width=0.004, headwidth=4)
 
 
-def browse(env, net1, net2, N=100, T=120, seed=0, device=None):
+def browse(env, actor1, actor2, N=100, T=120, seed=0, device=None):
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
     rng = np.random.default_rng(seed)
@@ -338,11 +350,11 @@ def browse(env, net1, net2, N=100, T=120, seed=0, device=None):
     fig, (ax_traj, ax_blue, ax_red) = plt.subplots(1, 3, figsize=(18, 6.5))
     plt.subplots_adjust(bottom=0.18, wspace=0.3)
     status = fig.text(0.02, 0.01, "", fontsize=9)
-    draw_policy_field(ax_blue, ax_red, env, net1, net2, device)
+    draw_policy_field(ax_blue, ax_red, env, actor1, actor2, device)
     fig.canvas.draw_idle()
 
     def render():
-        traj, r1s, r2s = rollout(env, net1, net2, starts[idx[0]], T=T, device=device)
+        traj, r1s, r2s = rollout(env, actor1, actor2, starts[idx[0]], T=T, device=device)
         s0 = starts[idx[0]]
         title = (f"{idx[0]+1}/{N}  p=({s0[0]:.2f},{s0[1]:.2f},{s0[2]:.2f},{s0[3]:.2f})  "
                  f"SR1={sum(r1s):.2f}  SR2={sum(r2s):.2f}")
@@ -359,7 +371,7 @@ def browse(env, net1, net2, N=100, T=120, seed=0, device=None):
     render(); plt.show()
 
 
-#  Entry point 
+# ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     t0 = time.time()
@@ -370,8 +382,8 @@ if __name__ == "__main__":
         houses_fixed=(0.25, 0.25, 0.75, 0.75),
     )
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    net1, net2, loss1_history, loss2_history = train(env, device=device)
+    actor1, actor2, loss1_history, loss2_history = train(env, device=device)
 
     print(f"Training time: {(time.time() - t0) / 60:.1f} minutes")
     plot_loss(loss1_history, loss2_history)
-    browse(env, net1, net2, N=100, T=120, seed=0, device=device)
+    browse(env, actor1, actor2, N=100, T=120, seed=0, device=device)
