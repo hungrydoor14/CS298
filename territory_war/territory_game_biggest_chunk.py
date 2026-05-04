@@ -37,7 +37,7 @@ EPS_END = 0.05
 EPS_DECAY = 2000
 TARGET_UPDATE = 50
 UPDATE_EVERY = 4       # only update network every N steps
-EPOCHS = 100
+EPOCHS = 50
 EPS_PER_EPOCH = 100
 
 # timer interval
@@ -82,8 +82,15 @@ def encode_state(env, player=None):
     row, col = env.pos[player]
     enemy_row, enemy_col = env.pos[env._other_player(player)]
     frontier_distance = env.frontier_distance(player)
+    biggest_empty_center = env.biggest_unclaimed_chunk_center()
     max_path = env.size * env.size
     frontier_feature = 1.0 if frontier_distance is None else frontier_distance / max_path
+    if biggest_empty_center is None:
+        chunk_row, chunk_col = row, col
+        chunk_distance_feature = 1.0
+    else:
+        chunk_row, chunk_col = biggest_empty_center
+        chunk_distance_feature = (abs(row - chunk_row) + abs(col - chunk_col)) / (2 * n)
 
     # Neighbor cell values for the active player: 0=empty, 1=own, -1=enemy, 2=wall
     neighbors = []
@@ -108,13 +115,16 @@ def encode_state(env, player=None):
         + [
             (abs(row - enemy_row) + abs(col - enemy_col)) / (2 * n),
             frontier_feature,
+            chunk_row / n,
+            chunk_col / n,
+            chunk_distance_feature,
         ],
         dtype=torch.float32, device=device
     )
 
 
 class DQN(nn.Module):
-    def __init__(self, state_dim=10, action_dim=4):
+    def __init__(self, state_dim=13, action_dim=4):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(state_dim, 64),
@@ -327,8 +337,52 @@ class TerritoryEnv:
     def counts(self):
         red = int(np.sum(self.board == RED))
         blue = int(np.sum(self.board == BLUE))
-        empty = self.size * self.size - red - blue
+        empty = int(np.sum(self.board == EMPTY))
         return {RED: red, BLUE: blue, EMPTY: empty}
+
+    def biggest_unclaimed_chunk_center(self):
+        visited = np.zeros((self.size, self.size), dtype=bool)
+        best_chunk = []
+
+        for start_row in range(self.size):
+            for start_col in range(self.size):
+                if visited[start_row, start_col] or int(self.board[start_row, start_col]) != EMPTY:
+                    continue
+
+                chunk = []
+                queue = deque([(start_row, start_col)])
+                visited[start_row, start_col] = True
+
+                while queue:
+                    row, col = queue.popleft()
+                    chunk.append((row, col))
+
+                    for dr, dc in DELTAS.values():
+                        nr, nc = row + dr, col + dc
+                        if not (0 <= nr < self.size and 0 <= nc < self.size):
+                            continue
+                        if visited[nr, nc] or int(self.board[nr, nc]) != EMPTY:
+                            continue
+
+                        visited[nr, nc] = True
+                        queue.append((nr, nc))
+
+                if len(chunk) > len(best_chunk):
+                    best_chunk = chunk
+
+        if not best_chunk:
+            return None
+
+        center_row = sum(row for row, _ in best_chunk) / len(best_chunk)
+        center_col = sum(col for _, col in best_chunk) / len(best_chunk)
+        return min(
+            best_chunk,
+            key=lambda cell: (
+                (cell[0] - center_row) ** 2 + (cell[1] - center_col) ** 2,
+                cell[0],
+                cell[1],
+            ),
+        )
 
     def frontier_distance(self, player=None):
         current = self.active_player if player is None else player
@@ -579,6 +633,7 @@ def rollout_match(env, agents, max_steps=None):
         env.reset()
         boards = [env.board.copy()]
         positions = [(env.pos[RED], env.pos[BLUE])]
+        unclaimed_centers = [env.biggest_unclaimed_chunk_center()]
         moves = []
         done = False
 
@@ -598,8 +653,9 @@ def rollout_match(env, agents, max_steps=None):
             })
             boards.append(board.copy())
             positions.append((env.pos[RED], env.pos[BLUE]))
+            unclaimed_centers.append(env.biggest_unclaimed_chunk_center())
 
-        return boards, moves, positions
+        return boards, moves, positions, unclaimed_centers
 
     return with_max_steps(env, rollout_max_steps, _run)
 
@@ -628,7 +684,7 @@ def prerender_frames(boards):
     return [CMAP(norm(b)) for b in boards]
 
 
-def draw_board(im, frame, ax, move, subtitle, red_pos, blue_pos):
+def draw_board(im, frame, ax, move, subtitle, red_pos, blue_pos, unclaimed_center):
     im.set_data(frame)
     for line in ax.lines[:]:
         line.remove()
@@ -637,6 +693,9 @@ def draw_board(im, frame, ax, move, subtitle, red_pos, blue_pos):
             markeredgecolor="#8b0000", markeredgewidth=2)
     ax.plot(blue_pos[1], blue_pos[0], "o", color="white", markersize=8,
             markeredgecolor="#00008b", markeredgewidth=2)
+    if unclaimed_center is not None:
+        ax.plot(unclaimed_center[1], unclaimed_center[0], "x", color="#f4d35e",
+                markersize=10, markeredgewidth=2.5)
 
     if move is None:
         ax.set_title("Initial board", fontsize=12, pad=10)
@@ -669,7 +728,7 @@ if __name__ == "__main__":
     )
 
     # ROLLOUT
-    boards, moves, positions = rollout_match(rollout_env, agents, max_steps=ROLLOUT_MAX_STEPS)
+    boards, moves, positions, unclaimed_centers = rollout_match(rollout_env, agents, max_steps=ROLLOUT_MAX_STEPS)
     print(board_summary(rollout_env))
 
     # BUFFER FRAMES
@@ -692,7 +751,7 @@ if __name__ == "__main__":
         move = None if idx[0] == 0 else moves[idx[0] - 1]
         subtitle = board_summary(rollout_env) if idx[0] == len(boards) - 1 else f"Step {idx[0]} of {len(boards) - 1}"
         red_pos, blue_pos = positions[idx[0]]
-        draw_board(im, frames[idx[0]], ax, move, subtitle, red_pos, blue_pos)
+        draw_board(im, frames[idx[0]], ax, move, subtitle, red_pos, blue_pos, unclaimed_centers[idx[0]])
         fig.suptitle("Territory Self-Play Rollout", fontsize=16, y=0.97)
         fig.canvas.draw_idle()
 
