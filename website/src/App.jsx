@@ -4,11 +4,11 @@ const width_allowed = 1100
 const images = {
   carZeroSum: [
     ["car-zero-sum-1.png", 55, 0],
-    ["car-zero-sum-2.png", 65, 0],
+    ["car-zero-sum-2.png", 55, 0, 0.975],
   ],
   carGenSum: [
     ["car-gensum-1.png", 55, 0],
-    ["car-gensum-2.png", 55, 0],
+    ["car-gensum-2.png", 55, 0, 0.99],
     ["car-gensum-3.png", 55, 0],
   ],
   carDQNPlanning: [
@@ -16,23 +16,23 @@ const images = {
     ["car-dqn-2.png", 60, 5],
   ],
   dogNash: [
-    ["dog-blue.png", 5, 5, 0.98],
-    ["dog-red.png", 0, 0],
+    ["dog-blue.png", 5, 5, 0.965],
+    ["dog-red.png", 5, 0],
     ["dog-solver-1.png", 0, 0],
-    ["dog-solver-2.png", 0, 0],
+    ["dog-solver-2.png", 0, 0, .995],
     ["dog-solver-3.png", 0, 0],
   ],
   dogLearning8: [
     ["dog-learning-8-blue.png", 0, 0],
     ["dog-learning-8-red.png", 0, 0],
     ["dog-learning-8-1.png", 30, 0],
-    ["dog-learning-8-2.png", 0, 0],
+    ["dog-learning-8-2.png", 0, 0, .975],
     ["dog-learning-8-3.png", 0, 0],
   ],
   dogLearning16: [
     ["dog-learning-16-blue.png", 0, 0],
-    ["dog-learning-16-red.png", 0, 0],
-    ["dog-learning-16-1.png", 0, 0],
+    ["dog-learning-16-red.png", 0, 0, .99],
+    ["dog-learning-16-1.png", 0, 0, .99],
     ["dog-learning-16-2.png", 0, 0],
     ["dog-learning-16-3.png", 0, 0],
     ["dog-learning-16-4.png", 0, 0],
