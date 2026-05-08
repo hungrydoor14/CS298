@@ -1,60 +1,116 @@
+import { useEffect, useRef, useState } from "react"
+
 const width_allowed = 1100
 const images = {
   carZeroSum: [
-    "car-zero-sum-1.png",
-    "car-zero-sum-2.png",
+    ["car-zero-sum-1.png", 55, 0],
+    ["car-zero-sum-2.png", 65, 0],
   ],
   carGenSum: [
-    "car-gensum-1.png",
-    "car-gensum-2.png",
-    "car-gensum-3.png"
+    ["car-gensum-1.png", 55, 0],
+    ["car-gensum-2.png", 55, 0],
+    ["car-gensum-3.png", 55, 0],
   ],
   carDQNPlanning: [
-    "car-dqn-1.png",
-    "car-dqn-2.png",
+    ["car-dqn-1.png", 55, 0],
+    ["car-dqn-2.png", 60, 5],
   ],
   dogNash: [
-    "dog-blue.png",
-    "dog-red.png",
-    "dog-solver-1.png",
-    "dog-solver-2.png",
-    "dog-solver-3.png"
+    ["dog-blue.png", 5, 5, 0.98],
+    ["dog-red.png", 0, 0],
+    ["dog-solver-1.png", 0, 0],
+    ["dog-solver-2.png", 0, 0],
+    ["dog-solver-3.png", 0, 0],
   ],
   dogLearning8: [
-    "dog-learning-8-blue.png",
-    "dog-learning-8-red.png",
-    "dog-learning-8-1.png",
-    "dog-learning-8-2.png",
-    "dog-learning-8-3.png"
+    ["dog-learning-8-blue.png", 0, 0],
+    ["dog-learning-8-red.png", 0, 0],
+    ["dog-learning-8-1.png", 30, 0],
+    ["dog-learning-8-2.png", 0, 0],
+    ["dog-learning-8-3.png", 0, 0],
   ],
   dogLearning16: [
-    "dog-learning-16-blue.png",
-    "dog-learning-16-red.png",
-    "dog-learning-16-1.png",
-    "dog-learning-16-2.png",
-    "dog-learning-16-3.png",
-    "dog-learning-16-4.png",
+    ["dog-learning-16-blue.png", 0, 0],
+    ["dog-learning-16-red.png", 0, 0],
+    ["dog-learning-16-1.png", 0, 0],
+    ["dog-learning-16-2.png", 0, 0],
+    ["dog-learning-16-3.png", 0, 0],
+    ["dog-learning-16-4.png", 0, 0],
   ],
   territoryStandardNoWalls: [
-    "territory-nw-1.png",
-    "territory-nw-2.png",
-    "territory-nw-3.png",
+    ["territory-nw-1.png", 65, 0],
+    ["territory-nw-2.png", 65, 0],
+    ["territory-nw-3.png", 65, 0],
   ],
   territoryStandardWalls: [
-    "territory-w-1.png",
-    "territory-w-2.png",
+    ["territory-w-1.png", 65, 0],
+    ["territory-w-2.png", 65, 0],
   ],
   territoryChunkNoWalls: [
-    "territory-nw-chunk-1.png",
+    ["territory-nw-chunk-1.png", 65, 0],
   ],
   territoryChunkWalls: [
-    "territory-w-chunk-1.png",
-    "territory-w-chunk-2.png",
+    ["territory-w-chunk-1.png", 65, 0],
+    ["territory-w-chunk-2.png", 65, 0],
   ],
 }
 
 const blue = "#1a6bc4"
 const lightBlue = "#e8f0fc"
+
+function ProjectImage({ src, alt, cropBottom, cropTop, scale = 1 }) {
+  const imgRef = useRef(null)
+  const [visibleHeight, setVisibleHeight] = useState(null)
+
+  useEffect(() => {
+    if ((cropBottom <= 0 && cropTop <= 0) || !imgRef.current) return undefined
+
+    const img = imgRef.current
+    const updateHeight = () => {
+      setVisibleHeight(Math.max(1, img.getBoundingClientRect().height - cropBottom - cropTop))
+    }
+    const observer = new ResizeObserver(updateHeight)
+
+    updateHeight()
+    observer.observe(img)
+
+    return () => observer.disconnect()
+  }, [cropBottom, cropTop, src])
+
+  if (cropBottom <= 0 && cropTop <= 0) {
+    return (
+      <img
+        src={src}
+        alt={alt}
+        style={{ width: `${scale * 100}%`, margin: "0 auto", borderRadius: 8, display: "block", border: "1px solid #e5e7eb" }}
+      />
+    )
+  }
+
+  return (
+    <div
+      style={{
+        width: "100%",
+        height: visibleHeight ?? "auto",
+        overflow: "hidden",
+        borderRadius: 8,
+        border: "1px solid #e5e7eb",
+      }}
+    >
+      <img
+        ref={imgRef}
+        src={src}
+        alt={alt}
+        onLoad={() => {
+          if (imgRef.current) {
+            setVisibleHeight(Math.max(1, imgRef.current.getBoundingClientRect().height - cropBottom - cropTop))
+          }
+        }}
+        style={{ width: `${scale * 100}%`, margin: "0 auto", display: "block", transform: `translateY(${-cropTop}px)` }}
+      />
+    </div>
+  )
+}
 
 export default function App() {
   const projects = [
@@ -316,13 +372,15 @@ export default function App() {
                     ))}
                   </ul>
                 )}
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                  {sub.images.map((src, i) => (
-                    <img
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, alignItems: "start" }}>
+                  {sub.images.map(([src, cropBottom, cropTop, scale], i) => (
+                    <ProjectImage
                       key={i}
                       src={src}
                       alt={`${sub.name} ${i + 1}`}
-                      style={{ width: "100%", borderRadius: 8, display: "block", border: "1px solid #e5e7eb" }}
+                      cropBottom={cropBottom}
+                      cropTop={cropTop}
+                      scale={scale}
                     />
                   ))}
                 </div>
