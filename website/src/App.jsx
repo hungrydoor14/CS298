@@ -35,6 +35,22 @@ const images = {
     "dog-learning-16-3.png",
     "dog-learning-16-4.png",
   ],
+  territoryStandardNoWalls: [
+    "territory-nw-1.png",
+    "territory-nw-2.png",
+    "territory-nw-3.png",
+  ],
+  territoryStandardWalls: [
+    "territory-w-1.png",
+    "territory-w-2.png",
+  ],
+  territoryChunkNoWalls: [
+    "territory-nw-chunk-1.png",
+  ],
+  territoryChunkWalls: [
+    "territory-w-chunk-1.png",
+    "territory-w-chunk-2.png",
+  ],
 }
 
 const blue = "#1a6bc4"
@@ -44,50 +60,193 @@ export default function App() {
   const projects = [
     {
       title: "Car Game",
-      intro: "Two players move around a grid. Player 1 (red) tries to collide with Player 2 (blue). Player 2 tries to escape. We solve this using game theory — finding strategies where neither player can do better by changing their move.",
+      intro: "Two players move around a grid. The state is both players' positions, and each turn both choose one of four moves: up, down, left, or right. The experiments compare exact Markov-game solvers with a neural planning approximation.",
+      info: [
+        {
+          label: "Environment",
+          text: "A discrete grid-world game with two agents moving simultaneously on the same board.",
+        },
+        {
+          label: "State",
+          text: "The state tracks both players' grid positions, so each decision depends on the relative distance and possible next moves.",
+        },
+        {
+          label: "Actions",
+          text: "Each player chooses a movement action on the grid at every step. The next state is determined by both choices together.",
+        },
+        {
+          label: "Goal",
+          text: "The exact reward depends on the variant: the zero-sum and planning versions optimize one shared payoff, while the general-sum version gives each player a separate payoff.",
+        },
+      ],
       subs: [
         {
           name: "Zero-Sum Solver",
-          description: "The classic version — what's good for one player is exactly bad for the other. We use tabular Q-iteration with fictitious play to find the Nash equilibrium: the pair of strategies where both players are playing their best possible response to each other. Red chases, blue runs, and the math finds the perfect balance.",
+          description: "The classic version uses one payoff matrix, with Player 1 maximizing it and Player 2 minimizing it. The code runs tabular Markov-game Q-iteration and periodically solves the local stage game, using a pure Nash equilibrium when one exists and fictitious play otherwise.",
           images: images.carZeroSum,
+          details: [
+            "Uses a Q-table where each state stores a 4-by-4 joint-action payoff matrix.",
+            "Rewards include a grid-position reward, living cost, stay penalty, and collision penalty.",
+            "Caches rounded policies between policy-refresh steps for faster value updates.",
+          ],
         },
         {
           name: "General-Sum Solver",
-          description: "A more realistic twist — both players now have their own independent goals, not just opposites of each other. Player 1 still wants to collide, but Player 2's reward also depends on where it ends up on the grid. We use iterated best-response to find Nash equilibria in this harder setting.",
+          description: "A more realistic twist: both players now have their own payoff matrices. Player 1 is rewarded for collision or reduced distance, while Player 2 is rewarded for avoiding collision, increasing distance, and its own grid-position reward.",
           images: images.carGenSum,
+          details: [
+            "Stores separate Q1 and Q2 tables for each state.",
+            "Searches for pure Nash equilibria in each local stage game.",
+            "Falls back to independent best responses when no pure equilibrium is found.",
+          ],
         },
         {
           name: "DQN Planning",
-          description: "Instead of solving the game exactly (which gets expensive fast), we train a neural network to approximate the Q-values. This version uses planning — the agent has access to the environment model and builds its strategy by simulating outcomes. Minimax policy: the red player picks the move that maximizes its worst-case outcome.",
+          description: "Instead of storing a Q-table for every state, this version trains a neural network to approximate Q-values over the 16 joint actions. It uses the environment model to compute Bellman targets by simulating transitions, then extracts a minimax policy from the learned Q matrix.",
           images: images.carDQNPlanning,
+          details: [
+            "Normalizes the four position coordinates as the neural-network input.",
+            "Outputs one value for each Player 1 / Player 2 action pair.",
+            "Chooses Player 1's action by maximizing the minimum value over Player 2's response.",
+          ],
         }
       ],
     },
     {
       title: "Dog Game",
-      intro: "Two players move around a continuous 2D space. Their midpoint is a virtual 'dog.' Each player is trying to steer the dog toward their own house. This is a cooperative-competitive setting — they share the dog but have different goals.",
+      intro: "Two players move around a continuous 2D space. Their midpoint is a virtual 'dog.' Each player is trying to steer the dog toward their own house. This is a cooperative-competitive setting, they share the dog but have different goals.",
+      info: [
+        {
+          label: "Environment",
+          text: "A continuous two-player control problem where the dog is defined by the midpoint between the two agents.",
+        },
+        {
+          label: "State",
+          text: "The state stores both agents' positions and the two fixed house positions; the dog's midpoint is computed from the agents after each move.",
+        },
+        {
+          label: "Actions",
+          text: "Agents choose movement directions. The 8-direction and 16-direction versions test how action resolution affects learned behavior.",
+        },
+        {
+          label: "Goal",
+          text: "Each player wants the shared dog to move toward their own house, creating a mixed cooperative and competitive learning problem.",
+        },
+      ],
       subs: [
         {
           name: "Nash Solver",
-          description: "Both agents use joint Q-networks — a single network that outputs Q-values for every pair of actions both players could take. At each step, we solve for the Nash equilibrium using iterated best-response. An LRU cache stores solutions for states we've already seen, which is the main trick that makes this tractable.",
+          description: "Each agent has a joint-action Q-network that outputs a K-by-K payoff matrix over both players' actions. During action selection and target computation, the code solves an approximate general-sum Nash equilibrium using repeated best responses.",
           images: images.dogNash,
+          details: [
+            "Uses separate networks for Player 1 and Player 2, each with joint-action outputs.",
+            "Computes rewards as the negative distance from the dog midpoint to each player's house.",
+            "Uses an LRU cache for rounded next states to avoid repeatedly solving the same Nash backup.",
+          ],
           analysis: "However, because a solver is needed at every step, training is very slow. The agents learn a decent strategy but it's not as polished as the DQN versions below. My efforts would then focus on the learning approach, which is more scalable and ultimately more interesting since it doesn't assume access to the environment model or a solver.",
           
         },
         {
           name: "Learning (8 directions)",
-          description: "Each player gets their own independent Q-network and learns on their own — no joint action matrix, no game theory solver. Despite the simplicity, they still learn to cooperate because their rewards are coupled through the dog's position. Soft target network updates keep training stable.",
+          description: "Each player gets their own independent Q-network and learns on their own, no joint action matrix, no game theory solver. Despite the simplicity, they still learn to cooperate because their rewards are coupled through the dog's position. Soft target network updates keep training stable.",
           images: images.dogLearning8,
+          details: [
+            "Uses independent Q-networks for the two agents.",
+            "Removes the equilibrium solver from the training loop.",
+            "Uses 8 base directions, plus half-step versions and a stay action in the 8-direction experiment.",
+          ],
           analysis: "With 8 directions the agents learn a coarse policy. Movement is visibly blocky and the dog tends to overshoot the target house before correcting.",
         },
         {
           name: "Learning (16 directions)",
-          description: "Each player gets their own independent Q-network and learns on their own — no joint action matrix, no game theory solver. Despite the simplicity, they still learn to cooperate because their rewards are coupled through the dog's position. Soft target network updates keep training stable.",
+          description: "Each player gets their own independent Q-network and learns on their own, no joint action matrix, no game theory solver. Despite the simplicity, they still learn to cooperate because their rewards are coupled through the dog's position. Soft target network updates keep training stable.",
           images: images.dogLearning16,
+          details: [
+            "Uses 16 base directions, plus half-step versions and a stay action in the 16-direction experiment.",
+            "Keeps the same independent DQN structure as the 8-direction version.",
+            "Improves trajectory quality by giving each player finer control.",
+          ],
           analysis: "16 directions gives much smoother trajectories. The agents develop a more refined cooperative strategy, with the dog taking more direct paths to the target.",
 
         },
       ],
+    },
+    {
+      title: "Territory War (DQN)",
+      intro: "Two DQN agents take turns moving through a grid and claiming territory. Each move either expands into an empty cell or, when boxed in, routes through owned cells toward the nearest reachable frontier. The winner is the player with more claimed cells when the board is exhausted or the move limit is reached.",
+      info: [
+        {
+          label: "Environment",
+          text: "A grid-based area-control game with red and blue agents, optional walls, and a board that records empty, red, blue, and wall cells.",
+        },
+        {
+          label: "State",
+          text: "The base state includes both player positions, four local neighbor-cell values, distance to the opponent, and distance to the nearest frontier.",
+        },
+        {
+          label: "Actions",
+          text: "Each agent chooses one of four moves: up, right, down, or left. Illegal moves into walls, board edges, or enemy cells are masked out.",
+        },
+        {
+          label: "Reward",
+          text: "Agents receive reward for claiming empty cells, small penalties for moving through owned cells, frontier-progress shaping, territory advantage shaping, and terminal win/loss/draw bonuses.",
+        },
+        {
+          label: "Limitation",
+          text: "The DQN setup mostly rewards expansion, so agents do not explicitly learn adversarial tactics like blocking, cutting off paths, or sacrificing short-term cells to limit the other player.",
+        },
+        {
+          label: "Future Work",
+          text: "A stronger version could use CNNs over the board state and add objectives that reward blocking, cutting off regions, and predicting how the opponent will expand.",
+        },
+      ],
+      subs: [
+        {
+          name: "Independent DQN, No Walls",
+          description: "This version trains separate DQN agents for red and blue on a smaller training grid, then rolls the learned greedy policies out on the larger board. Legal actions are constrained so agents expand whenever an adjacent empty cell is available, and otherwise move along a shortest route back to reachable empty territory. That makes the behavior good for claiming space, but weak at intentionally interfering with the opponent.",
+          images: images.territoryStandardNoWalls,
+          details: [
+            "Uses one online and one target network per player.",
+            "Masks illegal next actions during DQN target computation.",
+            "Randomizes side assignment and first player so policies do not memorize one opening.",
+          ],
+          analysis: "Without walls, the learned policy expands across an open board, so the main pressure is how efficiently each agent reaches and claims available frontier cells. Because there is no direct blocking objective, the agents usually race for space instead of planning denial moves.",
+        },
+        {
+          name: "Independent DQN, With Walls",
+          description: "This uses the same independent DQN setup, but enables the wall layout from the environment. The wall blocks movement and claiming, changing which frontiers are reachable and forcing the agents to work around separated regions.",
+          images: images.territoryStandardWalls,
+          details: [
+            "Keeps the same state features, rewards, and DQN architecture as the no-wall version.",
+            "Masks wall cells out of legal movement.",
+            "Tests whether the local frontier policy still works when the board is split by obstacles.",
+          ],
+          analysis: "The wall creates more structured expansion fronts. Agents can no longer treat the map as one open territory, so routing back to reachable empty cells matters more. Still, the competition is mostly indirect: walls constrain movement, but the agents are not learning to create those constraints against each other.",
+        },
+        {
+          name: "Chunk Feature, No Walls",
+          description: "This variant adds global information about the largest connected empty region. The state includes the center of that region and the active player's distance to it, giving the agent a signal for where the most valuable remaining territory is concentrated.",
+          images: images.territoryChunkNoWalls,
+          details: [
+            "Finds connected empty components with a breadth-first search.",
+            "Adds the largest chunk center and chunk-distance feature to the DQN input.",
+            "Uses the same reward structure and legal-action rules as the base territory game.",
+          ],
+          analysis: "On an open board, the chunk feature is meant to reduce shortsighted expansion by pointing the agent toward large remaining regions instead of only the nearest frontier.",
+        },
+        {
+          name: "Chunk Feature, With Walls",
+          description: "This combines the wall environment with the biggest-unclaimed-chunk state feature. Because walls split the board into connected regions, the chunk signal can help identify which reachable empty region is most strategically important.",
+          images: images.territoryChunkWalls,
+          details: [
+            "Computes the largest connected empty component while respecting occupied and wall cells.",
+            "Adds chunk center and chunk-distance inputs on top of the base state.",
+            "Keeps the same independent DQN training loop and terminal win/loss/draw shaping.",
+          ],
+          analysis: "With walls enabled, the chunk feature has a clearer role: it gives the policy a coarse global target when obstacles divide the remaining territory.",
+        },
+      ],
+      takeaway: "The next step would be to make the agents reason about the board more spatially and adversarially. A CNN-based policy could see territory shapes, walls, bottlenecks, and frontier patterns directly instead of relying only on hand-built local features. The reward could also include competitive signals for denying access to large regions, creating chokepoints, or reducing the opponent's reachable empty cells.",
     },
   ]
 
@@ -104,7 +263,7 @@ export default function App() {
             Multi-Agent Deep Q-Networks
           </h1>
           <p style={{ fontSize: 16, opacity: 0.85, lineHeight: 1.7, margin: 0, maxWidth: 560 }}>
-            How do you teach two AI agents to play a game against each other — or with each other — when neither knows what the other will do? This project explores that question through two custom environments and four different approaches, from classical game theory to deep reinforcement learning.
+            How do you teach two AI agents to play a game against each other, or with each other, when neither knows what the other will do? This project explores that question through two custom environments and four different approaches, from classical game theory to deep reinforcement learning.
           </p>
         </div>
       </div>
@@ -123,6 +282,18 @@ export default function App() {
                 {project.intro}
               </p>
             </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12, marginBottom: 28 }}>
+              {project.info.map((item) => (
+                <div key={item.label} style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: 14 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: blue, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>
+                    {item.label}
+                  </div>
+                  <p style={{ fontSize: 14, color: "#555", lineHeight: 1.6, margin: 0 }}>
+                    {item.text}
+                  </p>
+                </div>
+              ))}
+            </div>
 
             {/* Sub-projects */}
             {project.subs.map((sub, si) => (
@@ -138,6 +309,13 @@ export default function App() {
                 <p style={{ fontSize: 15, color: "#555", lineHeight: 1.75, margin: "0 0 20px" }}>
                   {sub.description}
                 </p>
+                {sub.details && (
+                  <ul style={{ color: "#555", fontSize: 14, lineHeight: 1.65, margin: "0 0 20px", paddingLeft: 22 }}>
+                    {sub.details.map((detail) => (
+                      <li key={detail}>{detail}</li>
+                    ))}
+                  </ul>
+                )}
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                   {sub.images.map((src, i) => (
                     <img
@@ -155,6 +333,11 @@ export default function App() {
 )}
               </div>
             ))}
+            {project.takeaway && (
+              <p style={{ fontSize: 15, color: "#555", lineHeight: 1.75, margin: "-20px 0 56px", borderTop: "1px solid #e5e7eb", paddingTop: 16 }}>
+                {project.takeaway}
+              </p>
+            )}
 
             {pi < projects.length - 1 && (
               <hr style={{ border: "none", borderTop: "1px solid #e5e7eb", margin: "0 0 80px" }} />
