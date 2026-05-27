@@ -57,6 +57,24 @@ const images = {
 
 const blue = "#1a6bc4"
 const lightBlue = "#e8f0fc"
+const overview = [
+  "The project compares several ways of making two agents learn in the same environment. Some versions solve small Markov games directly with Q-iteration, while others use neural networks to approximate Q-values when the state space becomes too large to enumerate cleanly.",
+  "The car experiments are discrete grid games. The exact solvers enumerate joint positions and solve local action matrices, while the DQN version normalizes the four car coordinates and predicts values for all 16 joint actions.",
+  "The dog experiments move into continuous 2D control. The state includes both players and both houses, and the dog is computed as the midpoint between the players, so both agents affect the same object even when their goals differ.",
+  "The territory experiments use independent DQN agents on a larger grid. Legal action masks, frontier-distance features, wall handling, and chunk features help the agents learn expansion behavior while keeping moves valid.",
+]
+const limitations = [
+  "The exact car solvers are useful for small grids, but full state enumeration becomes expensive as the grid grows.",
+  "The dog Nash solver is computationally heavy because training repeatedly estimates strategic responses over joint-action matrices.",
+  "The independent dog learners scale better, but they no longer explicitly solve an equilibrium and can learn unstable or coarse coordination.",
+  "The territory agents mostly optimize expansion and frontier progress, so adversarial blocking is still only partially represented in the reward.",
+]
+const futureWork = [
+  "Use CNN-based territory policies so agents can reason over the full board layout instead of mostly hand-built local features.",
+  "Add stronger blocking and denial rewards based on how much reachable territory the opponent loses after a move.",
+  "Compare the DQN variants with actor-critic or policy-gradient methods for the continuous dog game.",
+  "Turn the rollout viewers into more interactive browser visualizations so policies can be inspected without rerunning Python scripts.",
+]
 
 function ProjectImage({ src, alt, cropBottom, cropTop, scale = 1 }) {
   const imgRef = useRef(null)
@@ -141,9 +159,11 @@ export default function App() {
           description: "The classic version uses one payoff matrix, with Player 1 maximizing it and Player 2 minimizing it. The code runs tabular Markov-game Q-iteration and periodically solves the local stage game, using a pure Nash equilibrium when one exists and fictitious play otherwise.",
           images: images.carZeroSum,
           details: [
+            "Enumerates the 5-by-5 grid state space as joint positions (x1, y1, x2, y2).",
             "Uses a Q-table where each state stores a 4-by-4 joint-action payoff matrix.",
             "Rewards include a grid-position reward, living cost, stay penalty, and collision penalty.",
-            "Caches rounded policies between policy-refresh steps for faster value updates.",
+            "Solves local zero-sum stage games with pure equilibria when available and fictitious play otherwise.",
+            "Refreshes cached policies periodically during Q-iteration instead of resolving every state on every pass.",
           ],
         },
         {
@@ -151,7 +171,8 @@ export default function App() {
           description: "A more realistic twist: both players now have their own payoff matrices. Player 1 is rewarded for collision or reduced distance, while Player 2 is rewarded for avoiding collision, increasing distance, and its own grid-position reward.",
           images: images.carGenSum,
           details: [
-            "Stores separate Q1 and Q2 tables for each state.",
+            "Uses a larger 10-by-10 grid and stores separate Q1 and Q2 tables for each state.",
+            "Player 1 is rewarded for closing distance or colliding, while Player 2 is rewarded for keeping distance.",
             "Searches for pure Nash equilibria in each local stage game.",
             "Falls back to independent best responses when no pure equilibrium is found.",
           ],
@@ -162,8 +183,9 @@ export default function App() {
           images: images.carDQNPlanning,
           details: [
             "Normalizes the four position coordinates as the neural-network input.",
-            "Outputs one value for each Player 1 / Player 2 action pair.",
+            "Uses a 4 -> 64 -> 64 -> 16 network, where the 16 outputs reshape into a 4-by-4 joint-action matrix.",
             "Chooses Player 1's action by maximizing the minimum value over Player 2's response.",
+            "Trains from replay with a target network, epsilon-greedy exploration, and a minimax Bellman backup.",
           ],
         }
       ],
@@ -195,8 +217,10 @@ export default function App() {
           description: "Each agent has a joint-action Q-network that outputs a K-by-K payoff matrix over both players' actions. During action selection and target computation, the code solves an approximate general-sum Nash equilibrium using repeated best responses.",
           images: images.dogNash,
           details: [
-            "Uses separate networks for Player 1 and Player 2, each with joint-action outputs.",
+            "Uses separate networks for Player 1 and Player 2, each mapping the 8-value state to a K-by-K joint-action matrix.",
             "Computes rewards as the negative distance from the dog midpoint to each player's house.",
+            "Represents movement as full-step and half-step directions, with an optional stay action.",
+            "Uses iterated best responses to approximate the general-sum Nash backup during training.",
             "Uses an LRU cache for rounded next states to avoid repeatedly solving the same Nash backup.",
           ],
           analysis: "However, because a solver is needed at every step, training is very slow. The agents learn a decent strategy but it's not as polished as the DQN versions below. My efforts would then focus on the learning approach, which is more scalable and ultimately more interesting since it doesn't assume access to the environment model or a solver.",
@@ -207,9 +231,10 @@ export default function App() {
           description: "Each player gets their own independent Q-network and learns on their own, no joint action matrix, no game theory solver. Despite the simplicity, they still learn to cooperate because their rewards are coupled through the dog's position. Soft target network updates keep training stable.",
           images: images.dogLearning8,
           details: [
-            "Uses independent Q-networks for the two agents.",
+            "Uses independent Q-networks for the two agents, each outputting values only for its own action choices.",
             "Removes the equilibrium solver from the training loop.",
             "Uses 8 base directions, plus half-step versions and a stay action in the 8-direction experiment.",
+            "Updates each agent from replay using Smooth L1 loss, clipped gradients, and soft target-network updates.",
           ],
           analysis: "With 8 directions the agents learn a coarse policy. Movement is visibly blocky and the dog tends to overshoot the target house before correcting.",
         },
@@ -220,6 +245,7 @@ export default function App() {
           details: [
             "Uses 16 base directions, plus half-step versions and a stay action in the 16-direction experiment.",
             "Keeps the same independent DQN structure as the 8-direction version.",
+            "Trains longer with slower epsilon decay so the finer action space has time to stabilize.",
             "Improves trajectory quality by giving each player finer control.",
           ],
           analysis: "16 directions gives much smoother trajectories. The agents develop a more refined cooperative strategy, with the dog taking more direct paths to the target.",
@@ -264,6 +290,8 @@ export default function App() {
           details: [
             "Uses one online and one target network per player.",
             "Masks illegal next actions during DQN target computation.",
+            "Encodes local neighbor cells, opponent distance, and distance to the nearest frontier as state features.",
+            "Routes boxed-in agents through owned cells toward the closest reachable empty frontier.",
             "Randomizes side assignment and first player so policies do not memorize one opening.",
           ],
           analysis: "Without walls, the learned policy expands across an open board, so the main pressure is how efficiently each agent reaches and claims available frontier cells. Because there is no direct blocking objective, the agents usually race for space instead of planning denial moves.",
@@ -275,6 +303,7 @@ export default function App() {
           details: [
             "Keeps the same state features, rewards, and DQN architecture as the no-wall version.",
             "Masks wall cells out of legal movement.",
+            "Places a vertical wall segment in the board so reachable frontiers and routes change during rollout.",
             "Tests whether the local frontier policy still works when the board is split by obstacles.",
           ],
           analysis: "The wall creates more structured expansion fronts. Agents can no longer treat the map as one open territory, so routing back to reachable empty cells matters more. Still, the competition is mostly indirect: walls constrain movement, but the agents are not learning to create those constraints against each other.",
@@ -286,6 +315,7 @@ export default function App() {
           details: [
             "Finds connected empty components with a breadth-first search.",
             "Adds the largest chunk center and chunk-distance feature to the DQN input.",
+            "Highlights the largest unclaimed region during rollout so the effect of the global feature is visible.",
             "Uses the same reward structure and legal-action rules as the base territory game.",
           ],
           analysis: "On an open board, the chunk feature is meant to reduce shortsighted expansion by pointing the agent toward large remaining regions instead of only the nearest frontier.",
@@ -297,6 +327,7 @@ export default function App() {
           details: [
             "Computes the largest connected empty component while respecting occupied and wall cells.",
             "Adds chunk center and chunk-distance inputs on top of the base state.",
+            "Combines local legal-action masking with a coarse global target for the remaining empty space.",
             "Keeps the same independent DQN training loop and terminal win/loss/draw shaping.",
           ],
           analysis: "With walls enabled, the chunk feature has a clearer role: it gives the policy a coarse global target when obstacles divide the remaining territory.",
@@ -326,6 +357,23 @@ export default function App() {
 
       {/* Content */}
       <div style={{ maxWidth: width_allowed, margin: "0 auto", padding: "60px 24px 120px" }}>
+        <section style={{ marginBottom: 80 }}>
+          <div style={{ borderLeft: `4px solid ${blue}`, paddingLeft: 16, marginBottom: 20 }}>
+            <h2 style={{ fontSize: 24, fontWeight: 700, margin: "0 0 8px", color: "#111" }}>
+              Overview
+            </h2>
+            <p style={{ fontSize: 15, color: "#555", lineHeight: 1.7, margin: 0 }}>
+              The implementations move from exact game-solving methods toward neural approximations and larger learned policies.
+            </p>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 12 }}>
+            {overview.map((item) => (
+              <p key={item} style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: 14, fontSize: 14, color: "#555", lineHeight: 1.65, margin: 0 }}>
+                {item}
+              </p>
+            ))}
+          </div>
+        </section>
         {projects.map((project, pi) => (
           <div key={project.title} style={{ marginBottom: 80 }}>
 
@@ -402,7 +450,40 @@ export default function App() {
             )}
           </div>
         ))}
+        <section>
+          <div style={{ borderLeft: `4px solid ${blue}`, paddingLeft: 16, marginBottom: 20 }}>
+            <h2 style={{ fontSize: 24, fontWeight: 700, margin: "0 0 8px", color: "#111" }}>
+              Limitations & Future Work
+            </h2>
+            <p style={{ fontSize: 15, color: "#555", lineHeight: 1.7, margin: 0 }}>
+              The experiments work, but they also show where the current approaches start to strain.
+            </p>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 }}>
+            <div>
+              <h3 style={{ fontSize: 18, fontWeight: 600, margin: "0 0 12px", color: "#111" }}>
+                Limitations
+              </h3>
+              <ul style={{ color: "#555", fontSize: 14, lineHeight: 1.65, margin: 0, paddingLeft: 22 }}>
+                {limitations.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </div>
+            <div>
+              <h3 style={{ fontSize: 18, fontWeight: 600, margin: "0 0 12px", color: "#111" }}>
+                Future Work
+              </h3>
+              <ul style={{ color: "#555", fontSize: 14, lineHeight: 1.65, margin: 0, paddingLeft: 22 }}>
+                {futureWork.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        </section>
       </div>
     </div>
   )
 }
+
