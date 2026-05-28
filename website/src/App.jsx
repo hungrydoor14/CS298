@@ -53,6 +53,11 @@ const images = {
     ["territory-w-chunk-1.png", 65, 0],
     ["territory-w-chunk-2.png", 65, 0],
   ],
+  territoryCNN: [
+    ["territory-cnn-nw-1.png", 65, 0],
+    ["territory-cnn-nw-2.png", 65, 0],
+    ["territory-cnn-w-1.png", 65, 0],
+  ],
 }
 
 const blue = "#1a6bc4"
@@ -61,24 +66,37 @@ const overview = [
   "The project compares several ways of making two agents learn in the same environment. Some versions solve small Markov games directly with Q-iteration, while others use neural networks to approximate Q-values when the state space becomes too large to enumerate cleanly.",
   "The car experiments are discrete grid games. The exact solvers enumerate joint positions and solve local action matrices, while the DQN version normalizes the four car coordinates and predicts values for all 16 joint actions.",
   "The dog experiments move into continuous 2D control. The state includes both players and both houses, and the dog is computed as the midpoint between the players, so both agents affect the same object even when their goals differ.",
-  "The territory experiments use independent DQN agents on a larger grid. Legal action masks, frontier-distance features, wall handling, and chunk features help the agents learn expansion behavior while keeping moves valid.",
+  "The territory experiments use independent DQN agents on a larger grid. The final CNN version replaces mostly hand-built local features with board channels, letting the policy respond to spatial patterns like walls, territory shapes, and bottlenecks.",
 ]
 const limitations = [
   "The exact car solvers are useful for small grids, but full state enumeration becomes expensive as the grid grows.",
   "The dog Nash solver is computationally heavy because training repeatedly estimates strategic responses over joint-action matrices.",
   "The independent dog learners scale better, but they no longer explicitly solve an equilibrium and can learn unstable or coarse coordination.",
-  "The territory agents mostly optimize expansion and frontier progress, so adversarial blocking is still only partially represented in the reward.",
+  "The CNN territory agent improves spatial reasoning, but it is still an independent DQN setup rather than a full equilibrium or opponent-modeling method.",
 ]
-const futureWork = [
-  "Use CNN-based territory policies so agents can reason over the full board layout instead of mostly hand-built local features.",
-  "Add stronger blocking and denial rewards based on how much reachable territory the opponent loses after a move.",
-  "Compare the DQN variants with actor-critic or policy-gradient methods for the continuous dog game.",
-  "Turn the rollout viewers into more interactive browser visualizations so policies can be inspected without rerunning Python scripts.",
+const optimizationSuggestions = [
+  {
+    label: "Normalize The Problem",
+    text: "The key optimization was making the learning problem less dependent on one exact grid size. Position and distance-style signals are scaled relative to the board, and reward terms such as territory advantage and enemy reach reduction are divided by the total board area. That keeps the meaning of a feature or reward comparable whether the game is played on a compact training map or a larger rollout map.",
+  },
+  {
+    label: "Board-Channel Encoding",
+    text: "For the CNN version, the board is represented as channels instead of a fixed-length list tied to one board dimension. Separate channels mark the active player's cells, the enemy's cells, empty cells, walls, and both player locations. This turns the state into a spatial map, so the network can learn patterns like frontiers, blocked regions, and bottlenecks without hard-coding absolute coordinates.",
+  },
+  {
+    label: "Size-Flexible CNN",
+    text: "The CNN architecture supports different board sizes because the convolution layers operate locally across whatever grid they receive, and the global average/max pooling step compresses the resulting feature map into a fixed-size vector. That is what lets the same action head output four movement Q-values even when the input board changes from an 8-by-8 or 10-by-10 training board to a 30-by-30 test board.",
+  },
+  {
+    label: "Train Small, Deploy Larger",
+    text: "Once the state and rewards were normalized, training on smaller boards became a practical shortcut rather than a different task. The agents can collect faster experience on 8-by-8 and 10-by-10 grids, then the learned greedy policy can be evaluated on the full 30-by-30 board. The smaller grids speed up iteration, while the normalized representation keeps the final policy usable beyond the exact training size.",
+  },
 ]
 
 function ProjectImage({ src, alt, cropBottom, cropTop, scale = 1 }) {
   const imgRef = useRef(null)
   const [visibleHeight, setVisibleHeight] = useState(null)
+  const imageSrc = `${import.meta.env.BASE_URL}${src}`
 
   useEffect(() => {
     if ((cropBottom <= 0 && cropTop <= 0) || !imgRef.current) return undefined
@@ -98,7 +116,7 @@ function ProjectImage({ src, alt, cropBottom, cropTop, scale = 1 }) {
   if (cropBottom <= 0 && cropTop <= 0) {
     return (
       <img
-        src={src}
+        src={imageSrc}
         alt={alt}
         style={{ width: `${scale * 100}%`, margin: "0 auto", borderRadius: 8, display: "block", border: "1px solid #e5e7eb" }}
       />
@@ -117,7 +135,7 @@ function ProjectImage({ src, alt, cropBottom, cropTop, scale = 1 }) {
     >
       <img
         ref={imgRef}
-        src={src}
+        src={imageSrc}
         alt={alt}
         onLoad={() => {
           if (imgRef.current) {
@@ -254,8 +272,8 @@ export default function App() {
       ],
     },
     {
-      title: "Territory War (DQN)",
-      intro: "Two DQN agents take turns moving through a grid and claiming territory. Each move either expands into an empty cell or, when boxed in, routes through owned cells toward the nearest reachable frontier. The winner is the player with more claimed cells when the board is exhausted or the move limit is reached.",
+      title: "Territory War (Feature-Based DQN)",
+      intro: "Two DQN agents take turns moving through a grid and claiming territory. These versions use compact engineered state features such as nearby cell values, frontier distance, opponent distance, walls, and largest empty chunk information.",
       info: [
         {
           label: "Environment",
@@ -263,7 +281,7 @@ export default function App() {
         },
         {
           label: "State",
-          text: "The base state includes both player positions, four local neighbor-cell values, distance to the opponent, and distance to the nearest frontier.",
+          text: "The feature-based state includes player positions, local neighbor-cell values, distance to the opponent, distance to the nearest frontier, and optionally the largest empty chunk.",
         },
         {
           label: "Actions",
@@ -275,11 +293,7 @@ export default function App() {
         },
         {
           label: "Limitation",
-          text: "The DQN setup mostly rewards expansion, so agents do not explicitly learn adversarial tactics like blocking, cutting off paths, or sacrificing short-term cells to limit the other player.",
-        },
-        {
-          label: "Future Work",
-          text: "A stronger version could use CNNs over the board state and add objectives that reward blocking, cutting off regions, and predicting how the opponent will expand.",
+          text: "These agents mostly optimize expansion and frontier progress. Even with chunk features, they only receive a compressed view of the board, so adversarial blocking is hard to represent.",
         },
       ],
       subs: [
@@ -333,7 +347,44 @@ export default function App() {
           analysis: "With walls enabled, the chunk feature has a clearer role: it gives the policy a coarse global target when obstacles divide the remaining territory.",
         },
       ],
-      takeaway: "The next step would be to make the agents reason about the board more spatially and adversarially. A CNN-based policy could see territory shapes, walls, bottlenecks, and frontier patterns directly instead of relying only on hand-built local features. The reward could also include competitive signals for denying access to large regions, creating chokepoints, or reducing the opponent's reachable empty cells.",
+      takeaway: "The feature-based territory agents establish the basic game loop, legal-action masking, wall handling, and frontier routing. Their main limitation is representational: the agents receive selected summaries of the board rather than the board structure itself.",
+    },
+    {
+      title: "Territory War (CNN Policy)",
+      intro: "The CNN version keeps the same territory game, but changes the representation so the agent can reason over the board as a spatial object. This section is the place to add future CNN improvements, such as richer channels, stronger blocking rewards, or architecture changes.",
+      info: [
+        {
+          label: "State",
+          text: "The board is encoded as channels for the active player's cells, enemy cells, empty cells, walls, and both player locations.",
+        },
+        {
+          label: "Architecture",
+          text: "Convolution layers scan the board for local spatial patterns, then global average and max pooling convert the feature map into a fixed-size vector for action prediction.",
+        },
+        {
+          label: "Normalization",
+          text: "Rewards and board-dependent quantities are scaled so training on smaller boards remains meaningful when the policy is tested on larger boards.",
+        },
+        {
+          label: "Finding",
+          text: "This is the strongest territory version because the agent can respond to territory shapes, bottlenecks, walls, and blocked-off regions directly.",
+        },
+      ],
+      subs: [
+        {
+          name: "CNN Spatial Policy",
+          description: "This version replaces the hand-built state vector with a convolutional DQN. Instead of only seeing nearby cells and summary distances, the network receives board channels for the active player's territory, enemy territory, empty cells, walls, and both player locations. This lets the agent learn from territory shapes directly.",
+          images: images.territoryCNN,
+          details: [
+            "Uses convolution layers over the full board, followed by global average and max pooling before predicting the four movement Q-values.",
+            "Keeps legal-action masking so the policy only chooses valid moves.",
+            "Adds a blocking signal based on how much the move reduces the opponent's reachable empty territory.",
+            "Works in both open boards and wall boards without needing separate hand-built wall features.",
+          ],
+          analysis: "The CNN results are the clearest improvement in the territory experiments. On open boards, the policy can treat expansion as a spatial pattern instead of just chasing the nearest frontier. With walls, it can use bottlenecks and separated regions more naturally. The behavior is still not a full strategic solver, but it moves the project from local feature engineering toward learned board-level reasoning.",
+        },
+      ],
+      takeaway: "The CNN version is the best fit for this environment because walls, frontiers, bottlenecks, and blocked-off regions are visual board patterns, not just scalar distances.",
     },
   ]
 
@@ -450,40 +501,44 @@ export default function App() {
             )}
           </div>
         ))}
+        <section style={{ marginBottom: 80 }}>
+          <div style={{ borderLeft: `4px solid ${blue}`, paddingLeft: 16, marginBottom: 20 }}>
+            <h2 style={{ fontSize: 24, fontWeight: 700, margin: "0 0 8px", color: "#111" }}>
+              Optimization Suggestions
+            </h2>
+            <p style={{ fontSize: 15, color: "#555", lineHeight: 1.7, margin: 0 }}>
+              The biggest practical improvement was normalizing the territory setup so one policy could be trained on smaller boards and still run on larger ones.
+            </p>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 12 }}>
+            {optimizationSuggestions.map((item) => (
+              <div key={item.label} style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: 14 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: blue, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>
+                  {item.label}
+                </div>
+                <p style={{ fontSize: 14, color: "#555", lineHeight: 1.65, margin: 0 }}>
+                  {item.text}
+                </p>
+              </div>
+            ))}
+          </div>
+        </section>
         <section>
           <div style={{ borderLeft: `4px solid ${blue}`, paddingLeft: 16, marginBottom: 20 }}>
             <h2 style={{ fontSize: 24, fontWeight: 700, margin: "0 0 8px", color: "#111" }}>
-              Limitations & Future Work
+              Limitations
             </h2>
             <p style={{ fontSize: 15, color: "#555", lineHeight: 1.7, margin: 0 }}>
-              The experiments work, but they also show where the current approaches start to strain.
+              The experiments work, but they also show where each approach starts to strain.
             </p>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 }}>
-            <div>
-              <h3 style={{ fontSize: 18, fontWeight: 600, margin: "0 0 12px", color: "#111" }}>
-                Limitations
-              </h3>
-              <ul style={{ color: "#555", fontSize: 14, lineHeight: 1.65, margin: 0, paddingLeft: 22 }}>
-                {limitations.map((item) => (
-                  <li key={item}>{item}</li>
-                ))}
-              </ul>
-            </div>
-            <div>
-              <h3 style={{ fontSize: 18, fontWeight: 600, margin: "0 0 12px", color: "#111" }}>
-                Future Work
-              </h3>
-              <ul style={{ color: "#555", fontSize: 14, lineHeight: 1.65, margin: 0, paddingLeft: 22 }}>
-                {futureWork.map((item) => (
-                  <li key={item}>{item}</li>
-                ))}
-              </ul>
-            </div>
-          </div>
+          <ul style={{ color: "#555", fontSize: 14, lineHeight: 1.65, margin: 0, paddingLeft: 22 }}>
+            {limitations.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
         </section>
       </div>
     </div>
   )
 }
-
