@@ -53,10 +53,13 @@ const images = {
     ["territory-w-chunk-1.png", 65, 0],
     ["territory-w-chunk-2.png", 65, 0],
   ],
-  territoryCNN: [
+  territoryCNNNoWalls: [
     ["territory-cnn-nw-1.png", 65, 0],
     ["territory-cnn-nw-2.png", 65, 0],
+  ],
+  territoryCNNWalls: [
     ["territory-cnn-w-1.png", 65, 0],
+    ["territory-cnn-w-2.png", 65, 0],
   ],
 }
 
@@ -298,9 +301,8 @@ export default function App() {
       ],
       subs: [
         {
-          name: "Independent DQN, No Walls",
+          name: "Independent DQN",
           description: "This version trains separate DQN agents for red and blue on a smaller training grid, then rolls the learned greedy policies out on the larger board. Legal actions are constrained so agents expand whenever an adjacent empty cell is available, and otherwise move along a shortest route back to reachable empty territory. That makes the behavior good for claiming space, but weak at intentionally interfering with the opponent.",
-          images: images.territoryStandardNoWalls,
           details: [
             "Uses one online and one target network per player.",
             "Masks illegal next actions during DQN target computation.",
@@ -308,43 +310,40 @@ export default function App() {
             "Routes boxed-in agents through owned cells toward the closest reachable empty frontier.",
             "Randomizes side assignment and first player so policies do not memorize one opening.",
           ],
-          analysis: "Without walls, the learned policy expands across an open board, so the main pressure is how efficiently each agent reaches and claims available frontier cells. Because there is no direct blocking objective, the agents usually race for space instead of planning denial moves.",
-        },
-        {
-          name: "Independent DQN, With Walls",
-          description: "This uses the same independent DQN setup, but enables the wall layout from the environment. The wall blocks movement and claiming, changing which frontiers are reachable and forcing the agents to work around separated regions.",
-          images: images.territoryStandardWalls,
-          details: [
-            "Keeps the same state features, rewards, and DQN architecture as the no-wall version.",
-            "Masks wall cells out of legal movement.",
-            "Places a vertical wall segment in the board so reachable frontiers and routes change during rollout.",
-            "Tests whether the local frontier policy still works when the board is split by obstacles.",
+          imageGroups: [
+            {
+              title: "No Walls",
+              images: images.territoryStandardNoWalls,
+              analysis: "Without walls, the learned policy expands across an open board, so the main pressure is how efficiently each agent reaches and claims available frontier cells. Because there is no direct blocking objective, the agents usually race for space instead of planning denial moves.",
+            },
+            {
+              title: "With Walls",
+              images: images.territoryStandardWalls,
+              analysis: "The wall creates more structured expansion fronts. Agents can no longer treat the map as one open territory, so routing back to reachable empty cells matters more. Still, the competition is mostly indirect: walls constrain movement, but the agents are not learning to create those constraints against each other.",
+            },
           ],
-          analysis: "The wall creates more structured expansion fronts. Agents can no longer treat the map as one open territory, so routing back to reachable empty cells matters more. Still, the competition is mostly indirect: walls constrain movement, but the agents are not learning to create those constraints against each other.",
         },
         {
-          name: "Chunk Feature, No Walls",
+          name: "Chunk Feature",
           description: "This variant adds global information about the largest connected empty region. The state includes the center of that region and the active player's distance to it, giving the agent a signal for where the most valuable remaining territory is concentrated.",
-          images: images.territoryChunkNoWalls,
           details: [
             "Finds connected empty components with a breadth-first search.",
             "Adds the largest chunk center and chunk-distance feature to the DQN input.",
             "Highlights the largest unclaimed region during rollout so the effect of the global feature is visible.",
             "Uses the same reward structure and legal-action rules as the base territory game.",
           ],
-          analysis: "On an open board, the chunk feature is meant to reduce shortsighted expansion by pointing the agent toward large remaining regions instead of only the nearest frontier.",
-        },
-        {
-          name: "Chunk Feature, With Walls",
-          description: "This combines the wall environment with the biggest-unclaimed-chunk state feature. Because walls split the board into connected regions, the chunk signal can help identify which reachable empty region is most strategically important.",
-          images: images.territoryChunkWalls,
-          details: [
-            "Computes the largest connected empty component while respecting occupied and wall cells.",
-            "Adds chunk center and chunk-distance inputs on top of the base state.",
-            "Combines local legal-action masking with a coarse global target for the remaining empty space.",
-            "Keeps the same independent DQN training loop and terminal win/loss/draw shaping.",
+          imageGroups: [
+            {
+              title: "No Walls",
+              images: images.territoryChunkNoWalls,
+              analysis: "On an open board, the chunk feature is meant to reduce shortsighted expansion by pointing the agent toward large remaining regions instead of only the nearest frontier.",
+            },
+            {
+              title: "With Walls",
+              images: images.territoryChunkWalls,
+              analysis: "With walls enabled, the chunk feature has a clearer role: it gives the policy a coarse global target when obstacles divide the remaining territory.",
+            },
           ],
-          analysis: "With walls enabled, the chunk feature has a clearer role: it gives the policy a coarse global target when obstacles divide the remaining territory.",
         },
       ],
       takeaway: "The feature-based territory agents establish the basic game loop, legal-action masking, wall handling, and frontier routing. Their main limitation is representational: the agents receive selected summaries of the board rather than the board structure itself.",
@@ -374,14 +373,24 @@ export default function App() {
         {
           name: "CNN Spatial Policy",
           description: "This version replaces the hand-built state vector with a convolutional DQN. Instead of only seeing nearby cells and summary distances, the network receives board channels for the active player's territory, enemy territory, empty cells, walls, and both player locations. This lets the agent learn from territory shapes directly.",
-          images: images.territoryCNN,
           details: [
             "Uses convolution layers over the full board, followed by global average and max pooling before predicting the four movement Q-values.",
             "Keeps legal-action masking so the policy only chooses valid moves.",
             "Adds a blocking signal based on how much the move reduces the opponent's reachable empty territory.",
             "Works in both open boards and wall boards without needing separate hand-built wall features.",
           ],
-          analysis: "The CNN results are the clearest improvement in the territory experiments. On open boards, the policy can treat expansion as a spatial pattern instead of just chasing the nearest frontier. With walls, it can use bottlenecks and separated regions more naturally. The behavior is still not a full strategic solver, but it moves the project from local feature engineering toward learned board-level reasoning.",
+          imageGroups: [
+            {
+              title: "No Walls",
+              images: images.territoryCNNNoWalls,
+              analysis: "On open boards, the CNN can treat expansion as a spatial pattern instead of just chasing the nearest frontier. It sees territory shapes directly, so the behavior is less dependent on hand-built scalar summaries.",
+            },
+            {
+              title: "With Walls",
+              images: images.territoryCNNWalls,
+              analysis: "With walls, the CNN can use bottlenecks and separated regions more naturally because those structures are visible in the input channels. The behavior is still not a full strategic solver, but it moves the project from local feature engineering toward learned board-level reasoning.",
+            },
+          ],
         },
       ],
       takeaway: "The CNN version is the best fit for this environment because walls, frontiers, bottlenecks, and blocked-off regions are visual board patterns, not just scalar distances.",
@@ -471,18 +480,48 @@ export default function App() {
                     ))}
                   </ul>
                 )}
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, alignItems: "start" }}>
-                  {sub.images.map(([src, cropBottom, cropTop, scale], i) => (
-                    <ProjectImage
-                      key={i}
-                      src={src}
-                      alt={`${sub.name} ${i + 1}`}
-                      cropBottom={cropBottom}
-                      cropTop={cropTop}
-                      scale={scale}
-                    />
-                  ))}
-                </div>
+                {sub.images && (
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, alignItems: "start" }}>
+                    {sub.images.map(([src, cropBottom, cropTop, scale], i) => (
+                      <ProjectImage
+                        key={i}
+                        src={src}
+                        alt={`${sub.name} ${i + 1}`}
+                        cropBottom={cropBottom}
+                        cropTop={cropTop}
+                        scale={scale}
+                      />
+                    ))}
+                  </div>
+                )}
+                {sub.imageGroups && (
+                  <div style={{ display: "grid", gap: 22 }}>
+                    {sub.imageGroups.map((group) => (
+                      <div key={group.title}>
+                        <h4 style={{ fontSize: 15, fontWeight: 700, margin: "0 0 10px", color: "#111" }}>
+                          {group.title}
+                        </h4>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, alignItems: "start" }}>
+                          {group.images.map(([src, cropBottom, cropTop, scale], i) => (
+                            <ProjectImage
+                              key={i}
+                              src={src}
+                              alt={`${sub.name} ${group.title} ${i + 1}`}
+                              cropBottom={cropBottom}
+                              cropTop={cropTop}
+                              scale={scale}
+                            />
+                          ))}
+                        </div>
+                        {group.analysis && (
+                          <p style={{ fontSize: 15, color: "#555", lineHeight: 1.75, margin: "14px 0 0", borderTop: "1px solid #e5e7eb", paddingTop: 14 }}>
+                            {group.analysis}
+                          </p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
                 {sub.analysis && (
   <p style={{ fontSize: 15, color: "#555", lineHeight: 1.75, margin: "20px 0 0", borderTop: "1px solid #e5e7eb", paddingTop: 16 }}>
     {sub.analysis}
